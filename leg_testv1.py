@@ -9,6 +9,8 @@ hip = kit.servo[0]
 knee = kit.servo[1]
 ankle = kit.servo[2]
 
+
+
 servos = [hip, knee, ankle]
 
 # MG996R is usually treated as a 180-degree servo.
