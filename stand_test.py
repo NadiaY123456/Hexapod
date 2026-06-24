@@ -10,7 +10,7 @@ LEG_CHANNELS = {
     "leg3": [8, 9, 10],
 }
 
-JOINT_NAMES = ["ankle", "knee", "hip"]
+JOINT_NAMES = ["hip", "knee", "ankle"]
 
 NEUTRALS = {
     "leg1": [90, 90, 90],
@@ -28,21 +28,21 @@ DIRECTIONS = {
 # Tune these carefully.
 # These are offsets from neutral, not absolute angles.
 LEGS_OUT_POSE = {
-    "hip": 0,
+    "ankle": 0,
     "knee": -25,
-    "ankle": -35,
+    "hip": -35,
 }
 
 OUTER_BENT_POSE = {
-    "hip": 0,
+    "ankle": 0,
     "knee": -25,
-    "ankle": 10,
+    "hip": 10,
 }
 
 STANDING_POSE = {
-    "hip": 0,
+    "ankle": 0,
     "knee": 20,
-    "ankle": 15,
+    "hip": 15,
 }
 
 STEP_DELAY = 0.04
