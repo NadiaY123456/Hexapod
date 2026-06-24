@@ -42,7 +42,7 @@ OUTER_BENT_POSE = {
 STANDING_POSE = {
     "hip": 0,
     "knee": 20,
-    "ankle": 15,
+    "ankle": -75,
 }
 
 STEP_DELAY = 0.04
