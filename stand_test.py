@@ -35,7 +35,7 @@ DIRECTIONS = {
 # These are offsets from neutral.
 KNEE_UP = -25
 ANKLE_IN = -60
-KNEE_DOWN_PUSH = 25
+KNEE_DOWN_PUSH = -10
 
 STEP_DELAY = 0.04
 
@@ -123,10 +123,7 @@ try:
     standing_pose = [ANKLE_IN, KNEE_DOWN_PUSH]
     interpolate_pose(ankle_in_pose, standing_pose, steps=120)
 
-    print("Step 5: Final standing position")
-    standing_pose = [ANKLE_IN, KNEE_UP]
-    interpolate_pose(ankle_in_pose, standing_pose, steps=120)
-        
+
     print("Standing pose reached. Holding ankle and knee positions.")
     while True:
         time.sleep(1)
