@@ -123,6 +123,10 @@ try:
     standing_pose = [ANKLE_IN, KNEE_DOWN_PUSH]
     interpolate_pose(ankle_in_pose, standing_pose, steps=120)
 
+    print("Step 5: Final standing position")
+    standing_pose = [ANKLE_IN, KNEE_UP]
+    interpolate_pose(ankle_in_pose, standing_pose, steps=120)
+        
     print("Standing pose reached. Holding ankle and knee positions.")
     while True:
         time.sleep(1)
