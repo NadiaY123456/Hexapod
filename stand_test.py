@@ -10,7 +10,7 @@ LEG_CHANNELS = {
     "leg3": [8, 9, 10],
 }
 
-JOINT_NAMES = ["hip", "knee", "ankle"]
+JOINT_NAMES = ["ankle", "knee", "hip"]
 
 NEUTRALS = {
     "leg1": [90, 90, 90],
@@ -42,7 +42,7 @@ OUTER_BENT_POSE = {
 STANDING_POSE = {
     "hip": 0,
     "knee": 20,
-    "ankle": -75,
+    "ankle": 15,
 }
 
 STEP_DELAY = 0.04
