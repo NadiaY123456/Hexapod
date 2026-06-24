@@ -1,146 +1,129 @@
 import time
-
 from adafruit_servokit import ServoKit
 
 kit = ServoKit(channels=16)
 
-LEG_CHANNELS = {
-    "leg1": [0, 1, 2],
-    "leg2": [4, 5, 6],
-    "leg3": [8, 9, 10],
-}
+# Channel layout per leg:
+# channel 0 = ankle
+# channel 1 = knee
+# channel 2 = hip/body joint
+#
+# IMPORTANT:
+# This program NEVER commands the hip/body joint.
+# It only creates servo objects for ankle and knee.
 
-JOINT_NAMES = ["ankle", "knee", "hip"]
+LEG_CHANNELS = {
+    "leg1": {"ankle": 0, "knee": 1},
+    "leg2": {"ankle": 4, "knee": 5},
+    "leg3": {"ankle": 8, "knee": 9},
+}
 
 NEUTRALS = {
-    "leg1": [90, 90, 90],
-    "leg2": [90, 90, 90],
-    "leg3": [90, 90, 90],
+    "leg1": {"ankle": 90, "knee": 90},
+    "leg2": {"ankle": 90, "knee": 90},
+    "leg3": {"ankle": 90, "knee": 90},
 }
 
-# Change signs if a joint moves the wrong way.
+# Change to -1 if a joint moves the wrong direction.
 DIRECTIONS = {
-    "leg1": [1, 1, 1],
-    "leg2": [1, 1, 1],
-    "leg3": [1, 1, 1],
+    "leg1": {"ankle": 1, "knee": 1},
+    "leg2": {"ankle": 1, "knee": 1},
+    "leg3": {"ankle": 1, "knee": 1},
 }
 
-# Tune these carefully.
-# These are offsets from neutral, not absolute angles.
-LEGS_OUT_POSE = {
-    "hip": 0,
-    "knee": -25,
-    "ankle": -35,
-}
-
-OUTER_BENT_POSE = {
-    "hip": 0,
-    "knee": -25,
-    "ankle": 10,
-}
-
-STANDING_POSE = {
-    "hip": 0,
-    "knee": 20,
-    "ankle": 15,
-}
+# Motion tuning values.
+# These are offsets from neutral.
+KNEE_UP = -35
+ANKLE_IN = 30
+KNEE_DOWN_PUSH = 25
 
 STEP_DELAY = 0.04
-HOLD_DELAY = 2.0
 
 legs = {}
 
 for leg_name, channels in LEG_CHANNELS.items():
-    legs[leg_name] = []
+    legs[leg_name] = {}
 
-    for channel in channels:
+    for joint_name, channel in channels.items():
         servo = kit.servo[channel]
         servo.actuation_range = 180
         servo.set_pulse_width_range(700, 2300)
-        legs[leg_name].append(servo)
+        legs[leg_name][joint_name] = servo
 
 
 def clamp_angle(angle):
     return max(0, min(180, angle))
 
 
-def apply_offset(leg_name, joint_index, offset):
-    neutral = NEUTRALS[leg_name][joint_index]
-    direction = DIRECTIONS[leg_name][joint_index]
+def apply_offset(leg_name, joint_name, offset):
+    neutral = NEUTRALS[leg_name][joint_name]
+    direction = DIRECTIONS[leg_name][joint_name]
     return clamp_angle(neutral + direction * offset)
 
 
-def set_leg_offsets(leg_name, hip_offset, knee_offset, ankle_offset):
-    offsets = [hip_offset, knee_offset, ankle_offset]
+def set_leg_offsets(leg_name, ankle_offset, knee_offset):
+    ankle_angle = apply_offset(leg_name, "ankle", ankle_offset)
+    knee_angle = apply_offset(leg_name, "knee", knee_offset)
 
-    for i, offset in enumerate(offsets):
-        angle = apply_offset(leg_name, i, offset)
-        legs[leg_name][i].angle = angle
+    legs[leg_name]["ankle"].angle = ankle_angle
+    legs[leg_name]["knee"].angle = knee_angle
 
 
-def set_all_legs_pose(pose):
+def set_all_legs_offsets(ankle_offset, knee_offset, delay=0.0):
+    print(f"Offsets → ankle={ankle_offset:.1f}, knee={knee_offset:.1f}")
+
     for leg_name in legs:
-        set_leg_offsets(
-            leg_name,
-            pose["hip"],
-            pose["knee"],
-            pose["ankle"],
-        )
+        set_leg_offsets(leg_name, ankle_offset, knee_offset)
+
+    if delay > 0:
+        time.sleep(delay)
 
 
-def interpolate_pose(start_pose, end_pose, steps=50):
+def interpolate_pose(start_pose, end_pose, steps=60):
+    # Pose format: [ankle_offset, knee_offset]
     for step in range(steps + 1):
         t = step / steps
 
-        pose = {
-            "hip": start_pose["hip"] + (end_pose["hip"] - start_pose["hip"]) * t,
-            "knee": start_pose["knee"] + (end_pose["knee"] - start_pose["knee"]) * t,
-            "ankle": start_pose["ankle"] + (end_pose["ankle"] - start_pose["ankle"]) * t,
-        }
+        ankle = start_pose[0] + (end_pose[0] - start_pose[0]) * t
+        knee = start_pose[1] + (end_pose[1] - start_pose[1]) * t
 
-        print(
-            f"hip={pose['hip']:.1f}, "
-            f"knee={pose['knee']:.1f}, "
-            f"ankle={pose['ankle']:.1f}"
-        )
-
-        set_all_legs_pose(pose)
+        set_all_legs_offsets(ankle, knee)
         time.sleep(STEP_DELAY)
 
 
 def release_all():
-    print("Releasing all servos...")
+    print("Releasing ankle and knee servos only.")
     for leg_name in legs:
-        for servo in legs[leg_name]:
-            servo.angle = None
+        legs[leg_name]["ankle"].angle = None
+        legs[leg_name]["knee"].angle = None
 
 
 try:
     print("Starting stand-up sequence.")
-    print("Be ready to unplug power if anything binds or the robot tips.")
+    print("Only ankle and knee joints will move.")
+    print("Hip/body joints are never commanded by this program.")
+    print("Be ready to unplug power if anything binds or tips.")
 
-    print("Step 1: Move to legs-out starting pose.")
-    set_all_legs_pose(LEGS_OUT_POSE)
-    time.sleep(HOLD_DELAY)
+    neutral_pose = [0, 0]
 
-    print("Step 2: Bend outer joints first.")
-    interpolate_pose(
-        LEGS_OUT_POSE,
-        OUTER_BENT_POSE,
-        steps=60,
-    )
-    time.sleep(HOLD_DELAY)
+    print("Step 1: Set ankle and knee to neutral")
+    set_all_legs_offsets(0, 0, delay=2)
 
-    print("Step 3: Bend inner joints to push up.")
-    interpolate_pose(
-        OUTER_BENT_POSE,
-        STANDING_POSE,
-        steps=80,
-    )
-    time.sleep(HOLD_DELAY)
+    print("Step 2: Bend knees up")
+    knee_up_pose = [0, KNEE_UP]
+    interpolate_pose(neutral_pose, knee_up_pose, steps=80)
+    time.sleep(1)
 
-    print("Standing pose reached. Holding position.")
+    print("Step 3: Bend ankles in")
+    ankle_in_pose = [ANKLE_IN, KNEE_UP]
+    interpolate_pose(knee_up_pose, ankle_in_pose, steps=80)
+    time.sleep(1)
 
+    print("Step 4: Bend knees down to push up")
+    standing_pose = [ANKLE_IN, KNEE_DOWN_PUSH]
+    interpolate_pose(ankle_in_pose, standing_pose, steps=120)
+
+    print("Standing pose reached. Holding ankle and knee positions.")
     while True:
         time.sleep(1)
 
@@ -148,6 +131,4 @@ except KeyboardInterrupt:
     print("Stopped by user.")
 
 finally:
-    # Comment this out if you want the robot to keep holding itself up
-    # after Ctrl+C.
     release_all()
