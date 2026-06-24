@@ -30,33 +30,11 @@ DIRECTIONS = {
     "leg3": [1, 1, 1],
 }
 
-<<<<<<< HEAD
 # Standing motion tuning values.
 # These are offsets from neutral.
 KNEE_UP = -35
 ANKLE_IN = 30
 KNEE_DOWN_PUSH = 25
-=======
-# Tune these carefully.
-# These are offsets from neutral, not absolute angles.
-LEGS_OUT_POSE = {
-    "ankle": 0,
-    "knee": -25,
-    "hip": -35,
-}
-
-OUTER_BENT_POSE = {
-    "ankle": 0,
-    "knee": -25,
-    "hip": 10,
-}
-
-STANDING_POSE = {
-    "ankle": 0,
-    "knee": 20,
-    "hip": 15,
-}
->>>>>>> 68863f6731fb233168bbf088d1ef8b43fee2483b
 
 STEP_DELAY = 0.04
 
