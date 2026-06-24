@@ -34,7 +34,7 @@ DIRECTIONS = {
 # Motion tuning values.
 # These are offsets from neutral.
 KNEE_UP = -35
-ANKLE_IN = 30
+ANKLE_IN = -30
 KNEE_DOWN_PUSH = 25
 
 STEP_DELAY = 0.04
