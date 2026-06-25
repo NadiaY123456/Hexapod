@@ -66,7 +66,7 @@ CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
 # correction is positive because the physical robot needs the opposite knee
 # direction from the earlier inward-bend tests in order to stand.
 FOOT_DOWN_EXTRA_DURING_LIFT = -12.0
-KNEE_STAND_EXTRA_DURING_LIFT = 20.0
+KNEE_STAND_EXTRA_DURING_LIFT = 35.0
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
