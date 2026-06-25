@@ -65,7 +65,7 @@ CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
 # Real-world correction: couple foot motion directly to knee motion. When the
 # knees move in the stand direction, the foot joints move out with them so the
 # ground contact point stays planted instead of sliding inward.
-FOOT_OUT_PER_KNEE_DEGREE = 0.55
+FOOT_OUT_PER_KNEE_DEGREE = 0.38
 KNEE_STAND_EXTRA_DURING_LIFT = 20.0
 
 # Model angles for the 90-degree starting pose.
