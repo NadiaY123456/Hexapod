@@ -62,10 +62,10 @@ MEASURED_FLAT_FOOT_ANGLE = 22.0
 CONTACT_KNEE_OFFSET = -30.0
 CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
 
-# Real-world correction: move foot and knee together during the lift. The knee
-# correction is positive because the physical robot needs the opposite knee
-# direction from the earlier inward-bend tests in order to stand.
-FOOT_DOWN_EXTRA_DURING_LIFT = -8.0
+# Real-world correction: couple foot motion directly to knee motion. When the
+# knees move in the stand direction, the foot joints move out with them so the
+# ground contact point stays planted instead of sliding inward.
+FOOT_OUT_PER_KNEE_DEGREE = 0.55
 KNEE_STAND_EXTRA_DURING_LIFT = 20.0
 
 # Model angles for the 90-degree starting pose.
@@ -253,8 +253,9 @@ def ik_lift_from_contact(contact_pose, body_lift, steps=STAND_STEPS):
         target_x = contact_x
         target_z = contact_z + body_lift * t
         pose = solve_leg_ik(target_x, target_z, previous_pose)
-        pose[0] = CONTACT_FOOT_OFFSET + FOOT_DOWN_EXTRA_DURING_LIFT * t
         pose[1] += KNEE_STAND_EXTRA_DURING_LIFT * t
+        knee_delta = pose[1] - CONTACT_KNEE_OFFSET
+        pose[0] = CONTACT_FOOT_OFFSET + FOOT_OUT_PER_KNEE_DEGREE * knee_delta
 
         set_all_legs_offsets(pose[0], pose[1])
         previous_pose = pose
