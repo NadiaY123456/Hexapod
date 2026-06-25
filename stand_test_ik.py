@@ -54,7 +54,7 @@ HIP_START_ANGLE = 90
 UPPER_LEG_LENGTH = 65.58  # knee joint to foot joint, projected in the side plane
 LOWER_LEG_LENGTH = 78.42  # foot joint to the bottom contact point
 BODY_LIFT_AFTER_CONTACT = 15.0
-MEASURED_FLAT_FOOT_ANGLE = 21.5
+MEASURED_FLAT_FOOT_ANGLE = 22.0
 
 # Start slightly tucked so the feet are not as far out before the lift begins.
 # More negative foot offset pulls the feet inward. More negative knee offset
@@ -65,7 +65,7 @@ CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
 # Real-world correction: move foot and knee together during the lift. The knee
 # correction is positive because the physical robot needs the opposite knee
 # direction from the earlier inward-bend tests in order to stand.
-FOOT_DOWN_EXTRA_DURING_LIFT = -20.0
+FOOT_DOWN_EXTRA_DURING_LIFT = -8.0
 KNEE_STAND_EXTRA_DURING_LIFT = 20.0
 
 # Model angles for the 90-degree starting pose.
