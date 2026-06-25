@@ -54,10 +54,10 @@ HIP_START_ANGLE = 90
 UPPER_LEG_LENGTH = 65.58  # knee joint to foot joint, projected in the side plane
 LOWER_LEG_LENGTH = 78.42  # foot joint to the bottom contact point
 BODY_LIFT_AFTER_CONTACT = 15.0
-MEASURED_FLAT_FOOT_ANGLE = 26.0
+MEASURED_FLAT_FOOT_ANGLE = 28.0
 
 # Start closer to the body so the feet are not so far out from center.
-CONTACT_KNEE_OFFSET = -20.0
+CONTACT_KNEE_OFFSET = -5.0
 CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
 
 # Real-world correction: couple foot motion directly to knee motion. When the
