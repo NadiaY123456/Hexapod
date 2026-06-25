@@ -58,8 +58,8 @@ BODY_LIFT_AFTER_CONTACT = 20.0
 # Start slightly tucked so the feet are not as far out before the lift begins.
 # More negative foot offset pulls the feet inward. More negative knee offset
 # starts with the knees more bent.
-CONTACT_FOOT_OFFSET = -10.0
-CONTACT_KNEE_OFFSET = -10.0
+CONTACT_FOOT_OFFSET = -30.0
+CONTACT_KNEE_OFFSET = -30.0
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
