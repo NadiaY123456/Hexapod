@@ -13,16 +13,16 @@ kits = {
 # channel 2 = hip/body joint
 #
 # IMPORTANT:
-# This program NEVER commands the hip/body joint.
-# It only creates servo objects for foot and knee.
+# This program sets each hip/body joint to 90 once at startup.
+# After that, the IK loop only commands foot and knee.
 
 LEG_CHANNELS = {
-    "leg1": {"driver": "0x40", "foot": 0, "knee": 1},
-    "leg2": {"driver": "0x40", "foot": 4, "knee": 5},
-    "leg3": {"driver": "0x40", "foot": 8, "knee": 9},
-    "leg4": {"driver": "0x41", "foot": 0, "knee": 1},
-    "leg5": {"driver": "0x41", "foot": 4, "knee": 5},
-    "leg6": {"driver": "0x41", "foot": 8, "knee": 9},
+    "leg1": {"driver": "0x40", "foot": 0, "knee": 1, "hip": 2},
+    "leg2": {"driver": "0x40", "foot": 4, "knee": 5, "hip": 6},
+    "leg3": {"driver": "0x40", "foot": 8, "knee": 9, "hip": 10},
+    "leg4": {"driver": "0x41", "foot": 0, "knee": 1, "hip": 2},
+    "leg5": {"driver": "0x41", "foot": 4, "knee": 5, "hip": 6},
+    "leg6": {"driver": "0x41", "foot": 8, "knee": 9, "hip": 10},
 }
 
 NEUTRALS = {
@@ -47,12 +47,19 @@ DIRECTIONS = {
 STEP_DELAY = 0.04
 CONTACT_SETTLE_DELAY = 1.0
 STAND_STEPS = 120
+HIP_START_ANGLE = 90
 
 # IK constants measured from leg assembly.step in millimeters.
 # The 90-degree servo pose is treated as the starting foot-contact pose.
 UPPER_LEG_LENGTH = 65.58  # knee joint to foot joint, projected in the side plane
 LOWER_LEG_LENGTH = 78.42  # foot joint to the bottom contact point
-BODY_LIFT_AFTER_CONTACT = 25.0
+BODY_LIFT_AFTER_CONTACT = 20.0
+
+# Start slightly tucked so the feet are not as far out before the lift begins.
+# More negative foot offset pulls the feet inward. More negative knee offset
+# starts with the knees more bent.
+CONTACT_FOOT_OFFSET = -30.0
+CONTACT_KNEE_OFFSET = -30.0
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
@@ -62,6 +69,7 @@ KNEE_MODEL_DIRECTION = 1
 FOOT_MODEL_DIRECTION = 1
 
 legs = {}
+hips = {}
 
 for leg_name, channels in LEG_CHANNELS.items():
     legs[leg_name] = {}
@@ -72,6 +80,11 @@ for leg_name, channels in LEG_CHANNELS.items():
         servo.actuation_range = 180
         servo.set_pulse_width_range(700, 2300)
         legs[leg_name][joint_name] = servo
+
+    hip_servo = driver.servo[channels["hip"]]
+    hip_servo.actuation_range = 180
+    hip_servo.set_pulse_width_range(700, 2300)
+    hips[leg_name] = hip_servo
 
 
 def validate_ik_constants():
@@ -119,6 +132,16 @@ def set_all_legs_offsets(foot_offset, knee_offset, delay=0.0):
 
     for leg_name in legs:
         set_leg_offsets(leg_name, foot_offset, knee_offset)
+
+    if delay > 0:
+        time.sleep(delay)
+
+
+def set_all_hips_to_start_angle(delay=1.0):
+    print(f"Setting all hip/body joints to {HIP_START_ANGLE} degrees once.")
+
+    for hip_servo in hips.values():
+        hip_servo.angle = HIP_START_ANGLE
 
     if delay > 0:
         time.sleep(delay)
@@ -243,19 +266,21 @@ try:
 
     print("Starting IK stand-up sequence.")
     print("Only foot and knee joints will move.")
-    print("Hip/body joints are never commanded by this program.")
+    print("Hip/body joints are set to 90 once, then left alone.")
     print("Be ready to unplug power if anything binds or tips.")
 
-    neutral_pose = [0, 0]
+    contact_pose = [CONTACT_FOOT_OFFSET, CONTACT_KNEE_OFFSET]
 
-    print("Step 1: Set foot and knee to neutral/contact pose")
-    set_all_legs_offsets(0, 0, delay=2)
+    print("Step 1: Set hip/body joints to start angle")
+    set_all_hips_to_start_angle(delay=1)
+
+    print("Step 2: Set foot and knee to tucked contact pose")
+    set_all_legs_offsets(contact_pose[0], contact_pose[1], delay=2)
     time.sleep(CONTACT_SETTLE_DELAY)
 
-    print("Step 2: IK lift with feet held in place")
-    foot_contact_pose = neutral_pose
+    print("Step 3: IK lift with feet held in place")
     standing_pose = ik_lift_from_contact(
-        foot_contact_pose,
+        contact_pose,
         BODY_LIFT_AFTER_CONTACT,
         steps=STAND_STEPS,
     )
