@@ -53,13 +53,19 @@ HIP_START_ANGLE = 90
 # The 90-degree servo pose is treated as the starting foot-contact pose.
 UPPER_LEG_LENGTH = 65.58  # knee joint to foot joint, projected in the side plane
 LOWER_LEG_LENGTH = 78.42  # foot joint to the bottom contact point
-BODY_LIFT_AFTER_CONTACT = 20.0
+BODY_LIFT_AFTER_CONTACT = 15.0
+MEASURED_FLAT_FOOT_ANGLE = 21.5
 
 # Start slightly tucked so the feet are not as far out before the lift begins.
 # More negative foot offset pulls the feet inward. More negative knee offset
 # starts with the knees more bent.
-CONTACT_FOOT_OFFSET = -30.0
 CONTACT_KNEE_OFFSET = -30.0
+CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
+
+# Real-world correction: keep the foot at the measured flat-ground angle while
+# the knee bends inward during the lift. This is intentionally stronger than
+# the pure CAD-based IK because the physical feet were still sliding.
+KNEE_IN_EXTRA_DURING_LIFT = -35.0
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
@@ -246,6 +252,8 @@ def ik_lift_from_contact(contact_pose, body_lift, steps=STAND_STEPS):
         target_x = contact_x
         target_z = contact_z + body_lift * t
         pose = solve_leg_ik(target_x, target_z, previous_pose)
+        pose[0] = CONTACT_FOOT_OFFSET
+        pose[1] += KNEE_IN_EXTRA_DURING_LIFT * t
 
         set_all_legs_offsets(pose[0], pose[1])
         previous_pose = pose
