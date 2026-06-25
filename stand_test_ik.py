@@ -59,12 +59,11 @@ MEASURED_FLAT_FOOT_ANGLE = 30.0
 # Start closer to the body so the feet are not so far out from center.
 CONTACT_KNEE_OFFSET = -12.0
 CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
+FINAL_FOOT_OFFSET = 50.0 - NEUTRALS["leg1"]["foot"]
+FINAL_KNEE_OFFSET = 40.0 - NEUTRALS["leg1"]["knee"]
 
-# Real-world correction: couple foot motion directly to knee motion. When the
-# knees move in the stand direction, the foot joints move out with them so the
-# ground contact point stays planted instead of sliding inward.
-FOOT_OUT_PER_KNEE_DEGREE = 0.34
-KNEE_STAND_EXTRA_DURING_LIFT = 20.0
+# Real-world correction: move foot and knee together toward the measured final
+# standing angles. The final pose is foot=50 degrees and knee=40 degrees.
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
@@ -248,12 +247,10 @@ def ik_lift_from_contact(contact_pose, body_lift, steps=STAND_STEPS):
 
     for step in range(steps + 1):
         t = step / steps
-        target_x = contact_x
-        target_z = contact_z + body_lift * t
-        pose = solve_leg_ik(target_x, target_z, previous_pose)
-        pose[1] += KNEE_STAND_EXTRA_DURING_LIFT * t
-        knee_delta = pose[1] - CONTACT_KNEE_OFFSET
-        pose[0] = CONTACT_FOOT_OFFSET + FOOT_OUT_PER_KNEE_DEGREE * knee_delta
+        pose = [
+            CONTACT_FOOT_OFFSET + (FINAL_FOOT_OFFSET - CONTACT_FOOT_OFFSET) * t,
+            CONTACT_KNEE_OFFSET + (FINAL_KNEE_OFFSET - CONTACT_KNEE_OFFSET) * t,
+        ]
 
         set_all_legs_offsets(pose[0], pose[1])
         previous_pose = pose
