@@ -3,7 +3,7 @@ from adafruit_servokit import ServoKit
 
 kit = ServoKit(channels=16, address=0x40)
 
-CHANNEL = 4       # change this for each servo
+CHANNEL = 8       # change this for each servo
 angle = 30        # starting guess
 
 servo = kit.servo[CHANNEL]
