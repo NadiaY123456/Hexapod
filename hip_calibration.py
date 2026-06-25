@@ -1,7 +1,7 @@
 import time
 from adafruit_servokit import ServoKit
 
-kit = ServoKit(channels=16, address=0x40)
+kit = ServoKit(channels=16, address=0x41)
 
 CHANNEL = 8       # change this for each servo
 angle = 30        # starting guess
