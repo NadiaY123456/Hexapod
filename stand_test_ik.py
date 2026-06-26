@@ -66,6 +66,16 @@ CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
 FOOT_OUT_PER_KNEE_DEGREE = 0.34
 KNEE_STAND_EXTRA_DURING_LIFT = 20.0
 
+# Final pose from commit 70a7ad9, used as a second-phase drop after the
+# restored 229222f stand-up pose.
+DROP_TO_FOOT_ANGLE = 10.0
+DROP_TO_KNEE_ANGLE = 72.0
+DROP_TO_POSE = [
+    DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
+    DROP_TO_KNEE_ANGLE - NEUTRALS["leg1"]["knee"],
+]
+DROP_STEPS = 35
+
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
 KNEE_MODEL_ZERO_DEG = -49.6
@@ -292,6 +302,9 @@ try:
         BODY_LIFT_AFTER_CONTACT,
         steps=STAND_STEPS,
     )
+
+    print("Step 4: Drop into the 70a7ad9 final pose")
+    interpolate_pose(standing_pose, DROP_TO_POSE, steps=DROP_STEPS)
 
     print("Standing pose reached. Holding foot and knee positions.")
     while True:
