@@ -44,6 +44,18 @@ DIRECTIONS = {
     "leg6": {"foot": 1, "knee": 1},
 }
 
+# Per-leg calibration trims. The foot values come from the screenshot and are
+# relative to leg1's 21.5 degree reference:
+#   leg1=21.5, leg2=24.5, leg3=19.5, leg4=21.5, leg5=30.0, leg6=23.5
+TRIMS = {
+    "leg1": {"foot": 0.0, "knee": 0.0},
+    "leg2": {"foot": 3.0, "knee": 0.0},
+    "leg3": {"foot": -2.0, "knee": 0.0},
+    "leg4": {"foot": 0.0, "knee": 0.0},
+    "leg5": {"foot": 8.5, "knee": 0.0},
+    "leg6": {"foot": 2.0, "knee": 0.0},
+}
+
 STEP_DELAY = 0.04
 CONTACT_SETTLE_DELAY = 1.0
 STAND_STEPS = 120
@@ -131,7 +143,8 @@ def clamp_angle(angle):
 def apply_offset(leg_name, joint_name, offset):
     neutral = NEUTRALS[leg_name][joint_name]
     direction = DIRECTIONS[leg_name][joint_name]
-    return clamp_angle(neutral + direction * offset)
+    trim = TRIMS[leg_name][joint_name]
+    return clamp_angle(neutral + direction * offset + trim)
 
 
 def set_leg_offsets(leg_name, foot_offset, knee_offset):
