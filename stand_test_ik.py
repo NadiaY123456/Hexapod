@@ -87,9 +87,9 @@ HIP_TRIMS = {
     "leg6": 0.0,
 }
 
-STEP_DELAY = 0.04
+STEP_DELAY = 0.02
 CONTACT_SETTLE_DELAY = 1.0
-STAND_STEPS = 120
+STAND_STEPS = 60
 HIP_START_ANGLE = 90
 
 # IK constants measured from leg assembly.step in millimeters.
@@ -129,9 +129,9 @@ TRIPOD_B = ("leg2", "leg4", "leg6")
 
 WALK_LIFT_FOOT_DELTA = 22.0
 WALK_LIFT_KNEE_DELTA = -18.0
-WALK_HIP_SWING_DEG = 10.0
+WALK_HIP_SWING_DEG = 15.0
 WALK_HALF_CYCLE_STEPS = 9
-WALK_FRAME_DELAY = 0.018
+WALK_FRAME_DELAY = 0.024
 WALK_SETTLE_DELAY = 0.03
 
 # Model angles for the 90-degree starting pose.
