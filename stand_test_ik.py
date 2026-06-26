@@ -56,6 +56,37 @@ TRIMS = {
     "leg6": {"foot": 2.0, "knee": 0.0},
 }
 
+# Hip/body yaw calibration for walking. Legs 1-3 and 4-6 are assumed to be on
+# opposite sides, so their hip servos need opposite signs to move the feet in
+# the same world direction. If the robot turns in place instead of walking
+# forward, flip the signs for legs 4-6.
+HIP_NEUTRALS = {
+    "leg1": 90,
+    "leg2": 90,
+    "leg3": 90,
+    "leg4": 90,
+    "leg5": 90,
+    "leg6": 90,
+}
+
+HIP_DIRECTIONS = {
+    "leg1": 1,
+    "leg2": 1,
+    "leg3": 1,
+    "leg4": -1,
+    "leg5": -1,
+    "leg6": -1,
+}
+
+HIP_TRIMS = {
+    "leg1": 0.0,
+    "leg2": 0.0,
+    "leg3": 0.0,
+    "leg4": 0.0,
+    "leg5": 0.0,
+    "leg6": 0.0,
+}
+
 STEP_DELAY = 0.04
 CONTACT_SETTLE_DELAY = 1.0
 STAND_STEPS = 120
@@ -101,10 +132,9 @@ TRIPOD_B = ("leg2", "leg4", "leg6")
 
 WALK_LIFT_FOOT_DELTA = 12.0
 WALK_LIFT_KNEE_DELTA = -10.0
-WALK_PUSH_FOOT_DELTA = 4.0
-WALK_PUSH_KNEE_DELTA = 4.0
+WALK_HIP_SWING_DEG = 12.0
 WALK_LIFT_STEPS = 25
-WALK_SHIFT_STEPS = 25
+WALK_HIP_STEPS = 30
 WALK_SETTLE_DELAY = 0.2
 
 # Model angles for the 90-degree starting pose.
@@ -197,6 +227,37 @@ def set_all_hips_to_start_angle(delay=1.0):
 
     if delay > 0:
         time.sleep(delay)
+
+
+def hip_angle_from_offset(leg_name, hip_offset):
+    neutral = HIP_NEUTRALS[leg_name]
+    direction = HIP_DIRECTIONS[leg_name]
+    trim = HIP_TRIMS[leg_name]
+    return clamp_angle(neutral + direction * hip_offset + trim)
+
+
+def set_leg_hip_offset(leg_name, hip_offset):
+    hips[leg_name].angle = hip_angle_from_offset(leg_name, hip_offset)
+
+
+def set_all_hip_offsets(hip_offset, delay=0.0):
+    for leg_name in hips:
+        set_leg_hip_offset(leg_name, hip_offset)
+
+    if delay > 0:
+        time.sleep(delay)
+
+
+def interpolate_hip_offsets(group_offsets_start, group_offsets_end, steps=60):
+    for step in range(steps + 1):
+        t = step / steps
+
+        for leg_name, start_offset in group_offsets_start.items():
+            end_offset = group_offsets_end[leg_name]
+            hip_offset = start_offset + (end_offset - start_offset) * t
+            set_leg_hip_offset(leg_name, hip_offset)
+
+        time.sleep(STEP_DELAY)
 
 
 def interpolate_pose(start_pose, end_pose, steps=60):
@@ -326,10 +387,8 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         home_pose[0] + WALK_LIFT_FOOT_DELTA,
         home_pose[1] + WALK_LIFT_KNEE_DELTA,
     ]
-    push_pose = [
-        home_pose[0] + WALK_PUSH_FOOT_DELTA,
-        home_pose[1] + WALK_PUSH_KNEE_DELTA,
-    ]
+    all_leg_names = tuple(legs.keys())
+    hip_center = {leg_name: 0.0 for leg_name in all_leg_names}
 
     print(
         "Starting tripod walk: "
@@ -337,43 +396,72 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
     )
     print(
         "Walk poses -> "
-        f"home={home_pose}, lift={lift_pose}, push={push_pose}"
+        f"home={home_pose}, lift={lift_pose}, hip_swing={WALK_HIP_SWING_DEG}"
     )
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
+    set_all_hip_offsets(0.0, delay=WALK_SETTLE_DELAY)
+    current_hip_offsets = hip_center
 
     for cycle in range(1, cycles + 1):
-        print(f"Walk cycle {cycle}: move tripod A")
+        print(f"Walk cycle {cycle}: swing tripod A forward")
         interpolate_selected_pose(TRIPOD_A, home_pose, lift_pose, steps=WALK_LIFT_STEPS)
-        interpolate_selected_pose(TRIPOD_B, home_pose, push_pose, steps=WALK_SHIFT_STEPS)
+        hip_a_forward_b_back = {
+            leg_name: (
+                WALK_HIP_SWING_DEG
+                if leg_name in TRIPOD_A
+                else -WALK_HIP_SWING_DEG
+            )
+            for leg_name in all_leg_names
+        }
+        interpolate_hip_offsets(
+            current_hip_offsets,
+            hip_a_forward_b_back,
+            steps=WALK_HIP_STEPS,
+        )
+        current_hip_offsets = hip_a_forward_b_back
         interpolate_selected_pose(TRIPOD_A, lift_pose, home_pose, steps=WALK_LIFT_STEPS)
-        interpolate_selected_pose(TRIPOD_B, push_pose, home_pose, steps=WALK_SHIFT_STEPS)
         time.sleep(WALK_SETTLE_DELAY)
 
-        print(f"Walk cycle {cycle}: move tripod B")
+        print(f"Walk cycle {cycle}: swing tripod B forward")
         interpolate_selected_pose(TRIPOD_B, home_pose, lift_pose, steps=WALK_LIFT_STEPS)
-        interpolate_selected_pose(TRIPOD_A, home_pose, push_pose, steps=WALK_SHIFT_STEPS)
+        hip_b_forward_a_back = {
+            leg_name: (
+                WALK_HIP_SWING_DEG
+                if leg_name in TRIPOD_B
+                else -WALK_HIP_SWING_DEG
+            )
+            for leg_name in all_leg_names
+        }
+        interpolate_hip_offsets(
+            current_hip_offsets,
+            hip_b_forward_a_back,
+            steps=WALK_HIP_STEPS,
+        )
+        current_hip_offsets = hip_b_forward_a_back
         interpolate_selected_pose(TRIPOD_B, lift_pose, home_pose, steps=WALK_LIFT_STEPS)
-        interpolate_selected_pose(TRIPOD_A, push_pose, home_pose, steps=WALK_SHIFT_STEPS)
         time.sleep(WALK_SETTLE_DELAY)
 
     print("Tripod walk complete.")
     set_all_legs_offsets(home_pose[0], home_pose[1])
+    interpolate_hip_offsets(current_hip_offsets, hip_center, steps=WALK_HIP_STEPS)
 
 
 def release_all():
-    print("Releasing foot and knee servos only.")
+    print("Releasing foot, knee, and hip servos.")
     for leg_name in legs:
         legs[leg_name]["foot"].angle = None
         legs[leg_name]["knee"].angle = None
+    for hip_servo in hips.values():
+        hip_servo.angle = None
 
 
 try:
     validate_ik_constants()
 
     print("Starting IK stand-up sequence.")
-    print("Only foot and knee joints will move.")
-    print("Hip/body joints are set to 90 once, then left alone.")
+    print("Foot and knee joints move during stand-up.")
+    print("Hip/body joints are centered during stand-up and sweep during walking.")
     print("Be ready to unplug power if anything binds or tips.")
 
     contact_pose = [CONTACT_FOOT_OFFSET, CONTACT_KNEE_OFFSET]
