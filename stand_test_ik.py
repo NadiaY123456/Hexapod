@@ -111,15 +111,15 @@ KNEE_STAND_EXTRA_DURING_LIFT = 20.0
 
 # Final pose from commit 70a7ad9, used as a second-phase drop after the
 # restored 229222f stand-up pose.
-DROP_TO_FOOT_ANGLE = 12.0
-DROP_TO_KNEE_ANGLE = 76.0
+DROP_TO_FOOT_ANGLE = 18.0
+DROP_TO_KNEE_ANGLE = 88.0
 DROP_TO_POSE = [
     DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
     DROP_TO_KNEE_ANGLE - NEUTRALS["leg1"]["knee"],
 ]
 DROP_STEPS = 35
 
-# Fast, small-step tripod gait groups:
+# Fast tripod gait groups:
 #   tripod A = legs 1, 3, 5
 #   tripod B = legs 2, 4, 6
 WALK_AFTER_STAND = True
@@ -127,9 +127,9 @@ WALK_CYCLES = 12
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
 
-WALK_LIFT_FOOT_DELTA = 14.0
-WALK_LIFT_KNEE_DELTA = -11.0
-WALK_HIP_SWING_DEG = 8.0
+WALK_LIFT_FOOT_DELTA = 18.0
+WALK_LIFT_KNEE_DELTA = -14.0
+WALK_HIP_SWING_DEG = 12.0
 WALK_HALF_CYCLE_STEPS = 7
 WALK_FRAME_DELAY = 0.015
 WALK_SETTLE_DELAY = 0.03
