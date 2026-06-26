@@ -133,8 +133,8 @@ TRIPOD_B = ("leg2", "leg4", "leg6")
 WALK_LIFT_FOOT_DELTA = 18.0
 WALK_LIFT_KNEE_DELTA = -14.0
 WALK_HIP_SWING_DEG = 8.0
-WALK_LIFT_STEPS = 8
-WALK_HIP_STEPS = 8
+WALK_LIFT_STEPS = 2
+WALK_HIP_STEPS = 2
 WALK_SETTLE_DELAY = 0.1
 
 # Model angles for the 90-degree starting pose.
