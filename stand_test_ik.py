@@ -54,7 +54,7 @@ HIP_START_ANGLE = 90
 UPPER_LEG_LENGTH = 65.58  # knee joint to foot joint, projected in the side plane
 LOWER_LEG_LENGTH = 78.42  # foot joint to the bottom contact point
 BODY_LIFT_AFTER_CONTACT = 5.0
-MEASURED_FLAT_FOOT_ANGLE = 25.0
+MEASURED_FLAT_FOOT_ANGLE = 18.0
 
 # Start much closer to the body so the feet are not so far out from center.
 # The physical robot was wider than the model prediction, so this is tuned
