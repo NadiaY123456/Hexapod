@@ -54,17 +54,18 @@ HIP_START_ANGLE = 90
 UPPER_LEG_LENGTH = 65.58  # knee joint to foot joint, projected in the side plane
 LOWER_LEG_LENGTH = 78.42  # foot joint to the bottom contact point
 BODY_LIFT_AFTER_CONTACT = 15.0
-MEASURED_FLAT_FOOT_ANGLE = 48.0
+MEASURED_FLAT_FOOT_ANGLE = 60.0
 
 # Start much closer to the body so the feet are not so far out from center.
-# This contact pose is about 90 mm from the hip in the side-plane model.
-CONTACT_KNEE_OFFSET = -12.0
+# The physical robot was wider than the model prediction, so this is tuned
+# empirically to pull the contact point much farther inward.
+CONTACT_KNEE_OFFSET = -4.0
 CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
 
 # Real-world correction: couple foot motion directly to knee motion. When the
 # knees move in the stand direction, the foot joints move out with them so the
 # ground contact point stays planted instead of sliding inward.
-FOOT_OUT_PER_KNEE_DEGREE = 0.40
+FOOT_OUT_PER_KNEE_DEGREE = 0.44
 KNEE_STAND_EXTRA_DURING_LIFT = 20.0
 
 # Model angles for the 90-degree starting pose.
@@ -283,8 +284,8 @@ try:
     print("Step 1: Set hip/body joints to start angle")
     set_all_hips_to_start_angle(delay=1)
 
-    print("Step 2: Set foot and knee to tucked contact pose")
-    set_all_legs_offsets(contact_pose[0], contact_pose[1], delay=2)
+    print("Step 2: Ease foot and knee to tucked contact pose")
+    interpolate_pose([0.0, 0.0], contact_pose, steps=60)
     time.sleep(CONTACT_SETTLE_DELAY)
 
     print("Step 3: IK lift with feet held in place")
