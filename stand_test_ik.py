@@ -111,8 +111,8 @@ KNEE_STAND_EXTRA_DURING_LIFT = 20.0
 
 # Final pose from commit 70a7ad9, used as a second-phase drop after the
 # restored 229222f stand-up pose.
-DROP_TO_FOOT_ANGLE = 18.0
-DROP_TO_KNEE_ANGLE = 88.0
+DROP_TO_FOOT_ANGLE = 20.0
+DROP_TO_KNEE_ANGLE = 96.0
 DROP_TO_POSE = [
     DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
     DROP_TO_KNEE_ANGLE - NEUTRALS["leg1"]["knee"],
@@ -127,11 +127,11 @@ WALK_CYCLES = 12
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
 
-WALK_LIFT_FOOT_DELTA = 18.0
-WALK_LIFT_KNEE_DELTA = -14.0
-WALK_HIP_SWING_DEG = 12.0
-WALK_HALF_CYCLE_STEPS = 7
-WALK_FRAME_DELAY = 0.015
+WALK_LIFT_FOOT_DELTA = 22.0
+WALK_LIFT_KNEE_DELTA = -18.0
+WALK_HIP_SWING_DEG = 10.0
+WALK_HALF_CYCLE_STEPS = 9
+WALK_FRAME_DELAY = 0.018
 WALK_SETTLE_DELAY = 0.03
 
 # Model angles for the 90-degree starting pose.
@@ -380,9 +380,10 @@ def ik_lift_from_contact(contact_pose, body_lift, steps=STAND_STEPS):
 
 
 def set_walk_frame(home_pose, swing_tripod, stance_tripod, t):
+    eased_t = t * t * (3 - 2 * t)
     lift = math.sin(math.pi * t)
-    swing_hip = -WALK_HIP_SWING_DEG + (2 * WALK_HIP_SWING_DEG * t)
-    stance_hip = WALK_HIP_SWING_DEG - (2 * WALK_HIP_SWING_DEG * t)
+    swing_hip = -WALK_HIP_SWING_DEG + (2 * WALK_HIP_SWING_DEG * eased_t)
+    stance_hip = WALK_HIP_SWING_DEG - (2 * WALK_HIP_SWING_DEG * eased_t)
     swing_foot = home_pose[0] + WALK_LIFT_FOOT_DELTA * lift
     swing_knee = home_pose[1] + WALK_LIFT_KNEE_DELTA * lift
 
