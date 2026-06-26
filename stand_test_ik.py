@@ -53,20 +53,19 @@ HIP_START_ANGLE = 90
 # The 90-degree servo pose is treated as the starting foot-contact pose.
 UPPER_LEG_LENGTH = 65.58  # knee joint to foot joint, projected in the side plane
 LOWER_LEG_LENGTH = 78.42  # foot joint to the bottom contact point
-BODY_LIFT_AFTER_CONTACT = 5.0
-MEASURED_FLAT_FOOT_ANGLE = 40.0
+BODY_LIFT_AFTER_CONTACT = 2.0
+MEASURED_FLAT_FOOT_ANGLE = 50.0
 
 # Start much closer to the body so the feet are not so far out from center.
 # The physical robot was wider than the model prediction, so this is tuned
 # empirically to pull the contact point much farther inward.
-CONTACT_KNEE_OFFSET = 35.0
+CONTACT_KNEE_OFFSET = -10.0
 CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
 
-# Real-world correction: couple foot motion directly to knee motion. When the
-# knees move in the stand direction, the foot joints move out with them so the
-# ground contact point stays planted instead of sliding inward.
-FOOT_OUT_PER_KNEE_DEGREE = 0.44
-KNEE_STAND_EXTRA_DURING_LIFT = 20.0
+# Real-world correction: testing showed higher knee angles make the robot
+# taller and more horizontal, so the lift phase must not add positive knee.
+FOOT_OUT_PER_KNEE_DEGREE = -0.30
+KNEE_STAND_EXTRA_DURING_LIFT = -8.0
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
