@@ -88,6 +88,25 @@ DROP_TO_POSE = [
 ]
 DROP_STEPS = 35
 
+# Tripod gait groups:
+#   tripod A = legs 1, 3, 5
+#   tripod B = legs 2, 4, 6
+#
+# With hip/body joints held fixed, this is a conservative alternating tripod
+# stepping motion. True forward stride usually needs hip/body sweep too.
+WALK_AFTER_STAND = True
+WALK_CYCLES = 4
+TRIPOD_A = ("leg1", "leg3", "leg5")
+TRIPOD_B = ("leg2", "leg4", "leg6")
+
+WALK_LIFT_FOOT_DELTA = 12.0
+WALK_LIFT_KNEE_DELTA = -10.0
+WALK_PUSH_FOOT_DELTA = 4.0
+WALK_PUSH_KNEE_DELTA = 4.0
+WALK_LIFT_STEPS = 25
+WALK_SHIFT_STEPS = 25
+WALK_SETTLE_DELAY = 0.2
+
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
 KNEE_MODEL_ZERO_DEG = -49.6
@@ -165,6 +184,11 @@ def set_all_legs_offsets(foot_offset, knee_offset, delay=0.0):
         time.sleep(delay)
 
 
+def set_selected_legs_offsets(leg_names, foot_offset, knee_offset):
+    for leg_name in leg_names:
+        set_leg_offsets(leg_name, foot_offset, knee_offset)
+
+
 def set_all_hips_to_start_angle(delay=1.0):
     print(f"Setting all hip/body joints to {HIP_START_ANGLE} degrees once.")
 
@@ -184,6 +208,18 @@ def interpolate_pose(start_pose, end_pose, steps=60):
         knee = start_pose[1] + (end_pose[1] - start_pose[1]) * t
 
         set_all_legs_offsets(foot, knee)
+        time.sleep(STEP_DELAY)
+
+
+def interpolate_selected_pose(leg_names, start_pose, end_pose, steps=60):
+    # Pose format: [foot_offset, knee_offset]
+    for step in range(steps + 1):
+        t = step / steps
+
+        foot = start_pose[0] + (end_pose[0] - start_pose[0]) * t
+        knee = start_pose[1] + (end_pose[1] - start_pose[1]) * t
+
+        set_selected_legs_offsets(leg_names, foot, knee)
         time.sleep(STEP_DELAY)
 
 
@@ -285,6 +321,46 @@ def ik_lift_from_contact(contact_pose, body_lift, steps=STAND_STEPS):
     return previous_pose
 
 
+def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
+    lift_pose = [
+        home_pose[0] + WALK_LIFT_FOOT_DELTA,
+        home_pose[1] + WALK_LIFT_KNEE_DELTA,
+    ]
+    push_pose = [
+        home_pose[0] + WALK_PUSH_FOOT_DELTA,
+        home_pose[1] + WALK_PUSH_KNEE_DELTA,
+    ]
+
+    print(
+        "Starting tripod walk: "
+        f"A={TRIPOD_A}, B={TRIPOD_B}, cycles={cycles}"
+    )
+    print(
+        "Walk poses -> "
+        f"home={home_pose}, lift={lift_pose}, push={push_pose}"
+    )
+
+    set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
+
+    for cycle in range(1, cycles + 1):
+        print(f"Walk cycle {cycle}: move tripod A")
+        interpolate_selected_pose(TRIPOD_A, home_pose, lift_pose, steps=WALK_LIFT_STEPS)
+        interpolate_selected_pose(TRIPOD_B, home_pose, push_pose, steps=WALK_SHIFT_STEPS)
+        interpolate_selected_pose(TRIPOD_A, lift_pose, home_pose, steps=WALK_LIFT_STEPS)
+        interpolate_selected_pose(TRIPOD_B, push_pose, home_pose, steps=WALK_SHIFT_STEPS)
+        time.sleep(WALK_SETTLE_DELAY)
+
+        print(f"Walk cycle {cycle}: move tripod B")
+        interpolate_selected_pose(TRIPOD_B, home_pose, lift_pose, steps=WALK_LIFT_STEPS)
+        interpolate_selected_pose(TRIPOD_A, home_pose, push_pose, steps=WALK_SHIFT_STEPS)
+        interpolate_selected_pose(TRIPOD_B, lift_pose, home_pose, steps=WALK_LIFT_STEPS)
+        interpolate_selected_pose(TRIPOD_A, push_pose, home_pose, steps=WALK_SHIFT_STEPS)
+        time.sleep(WALK_SETTLE_DELAY)
+
+    print("Tripod walk complete.")
+    set_all_legs_offsets(home_pose[0], home_pose[1])
+
+
 def release_all():
     print("Releasing foot and knee servos only.")
     for leg_name in legs:
@@ -318,6 +394,10 @@ try:
 
     print("Step 4: Drop into the 70a7ad9 final pose")
     interpolate_pose(standing_pose, DROP_TO_POSE, steps=DROP_STEPS)
+
+    if WALK_AFTER_STAND:
+        print("Step 5: Run tripod walking cycles")
+        walk_tripod_cycles(DROP_TO_POSE, cycles=WALK_CYCLES)
 
     print("Standing pose reached. Holding foot and knee positions.")
     while True:
