@@ -123,8 +123,12 @@ DROP_STEPS = 30
 # Fast tripod gait groups:
 #   tripod A = legs 1, 3, 5
 #   tripod B = legs 2, 4, 6
+<<<<<<< HEAD
 WALK_AFTER_STAND = False
 KEYBOARD_WALK_AFTER_STAND = True
+=======
+WALK_AFTER_STAND = True
+>>>>>>> d970142da40ad73ae3eeb6eeebe68c40ec3ba518
 WALK_CYCLES = 8
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
@@ -146,7 +150,10 @@ HIP_SWING_SCALE = {
 WALK_HALF_CYCLE_STEPS = 7
 WALK_FRAME_DELAY = 0.018
 WALK_SETTLE_DELAY = 0.03
+<<<<<<< HEAD
 KEY_RELEASE_TIMEOUT = 0.25
+=======
+>>>>>>> d970142da40ad73ae3eeb6eeebe68c40ec3ba518
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
@@ -463,6 +470,7 @@ def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
     for leg_name in stance_tripod:
         set_leg_offsets(leg_name, home_pose[0], home_pose[1])
         set_leg_hip_offset(leg_name, stance_hip * HIP_SWING_SCALE[leg_name])
+<<<<<<< HEAD
 
 
 def tripod_start_offsets(direction=1):
@@ -491,12 +499,25 @@ def walk_half_cycle(home_pose, swing_tripod, stance_tripod, direction=1):
             direction=direction,
         )
         time.sleep(WALK_FRAME_DELAY)
+=======
+>>>>>>> d970142da40ad73ae3eeb6eeebe68c40ec3ba518
 
 
 def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
     all_leg_names = tuple(legs.keys())
     hip_center = {leg_name: 0.0 for leg_name in all_leg_names}
+<<<<<<< HEAD
     hip_start = tripod_start_offsets(direction=1)
+=======
+    hip_start = {
+        leg_name: (
+            -WALK_HIP_SWING_DEG
+            if leg_name in TRIPOD_A
+            else WALK_HIP_SWING_DEG
+        ) * HIP_SWING_SCALE[leg_name]
+        for leg_name in all_leg_names
+    }
+>>>>>>> d970142da40ad73ae3eeb6eeebe68c40ec3ba518
 
     print(
         "Starting fast small-step tripod walk: "
