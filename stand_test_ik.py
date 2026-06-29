@@ -112,7 +112,7 @@ KNEE_STAND_EXTRA_DURING_LIFT = 20.0
 
 # Final pose from commit 70a7ad9, used as a second-phase drop after the
 # restored 229222f stand-up pose.
-DROP_TO_FOOT_ANGLE = 0.0
+DROP_TO_FOOT_ANGLE = 20.0
 DROP_TO_KNEE_ANGLE = 96.0
 DROP_TO_POSE = [
     DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
