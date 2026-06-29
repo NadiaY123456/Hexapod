@@ -129,8 +129,8 @@ WALK_CYCLES = 8
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
 
-WALK_LIFT_FOOT_DELTA = 35.0
-WALK_LIFT_KNEE_DELTA = -22.0
+WALK_LIFT_FOOT_DELTA = 28.0
+WALK_LIFT_KNEE_DELTA = -19.0
 WALK_HIP_SWING_DEG = 15.0
 # Left-veer correction: give the 0x40 side a slightly longer hip stride and
 # the 0x41 side a slightly shorter stride. If the veer gets worse, swap these
