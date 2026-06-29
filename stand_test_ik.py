@@ -130,6 +130,17 @@ TRIPOD_B = ("leg2", "leg4", "leg6")
 WALK_LIFT_FOOT_DELTA = 28.0
 WALK_LIFT_KNEE_DELTA = -19.0
 WALK_HIP_SWING_DEG = 15.0
+# Left-veer correction: give the 0x40 side a slightly longer hip stride and
+# the 0x41 side a slightly shorter stride. If the veer gets worse, swap these
+# scale values between the two sides.
+HIP_SWING_SCALE = {
+    "leg1": 1.06,
+    "leg2": 1.06,
+    "leg3": 1.06,
+    "leg4": 0.94,
+    "leg5": 0.94,
+    "leg6": 0.94,
+}
 WALK_HALF_CYCLE_STEPS = 7
 WALK_FRAME_DELAY = 0.018
 WALK_SETTLE_DELAY = 0.03
@@ -389,11 +400,11 @@ def set_walk_frame(home_pose, swing_tripod, stance_tripod, t):
 
     for leg_name in swing_tripod:
         set_leg_offsets(leg_name, swing_foot, swing_knee)
-        set_leg_hip_offset(leg_name, swing_hip)
+        set_leg_hip_offset(leg_name, swing_hip * HIP_SWING_SCALE[leg_name])
 
     for leg_name in stance_tripod:
         set_leg_offsets(leg_name, home_pose[0], home_pose[1])
-        set_leg_hip_offset(leg_name, stance_hip)
+        set_leg_hip_offset(leg_name, stance_hip * HIP_SWING_SCALE[leg_name])
 
 
 def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
@@ -404,7 +415,7 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
             -WALK_HIP_SWING_DEG
             if leg_name in TRIPOD_A
             else WALK_HIP_SWING_DEG
-        )
+        ) * HIP_SWING_SCALE[leg_name]
         for leg_name in all_leg_names
     }
 
@@ -415,6 +426,7 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
     print(
         "Walk tuning -> "
         f"hip_swing={WALK_HIP_SWING_DEG}, "
+        f"hip_scale={HIP_SWING_SCALE}, "
         f"lift_foot={WALK_LIFT_FOOT_DELTA}, "
         f"lift_knee={WALK_LIFT_KNEE_DELTA}, "
         f"steps={WALK_HALF_CYCLE_STEPS}, delay={WALK_FRAME_DELAY}"
