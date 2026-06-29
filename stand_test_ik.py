@@ -87,9 +87,9 @@ HIP_TRIMS = {
     "leg6": 15.0,
 }
 
-STEP_DELAY = 0.06
+STEP_DELAY = 0.04
 CONTACT_SETTLE_DELAY = 1.0
-STAND_STEPS = 100
+STAND_STEPS = 80
 HIP_START_ANGLE = 90
 
 # IK constants measured from leg assembly.step in millimeters.
@@ -117,7 +117,7 @@ DROP_TO_POSE = [
     DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
     DROP_TO_KNEE_ANGLE - NEUTRALS["leg1"]["knee"],
 ]
-DROP_STEPS = 70
+DROP_STEPS = 50
 
 # Fast tripod gait groups:
 #   tripod A = legs 1, 3, 5
@@ -127,12 +127,12 @@ WALK_CYCLES = 4
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
 
-WALK_LIFT_FOOT_DELTA = 22.0
-WALK_LIFT_KNEE_DELTA = -16.0
+WALK_LIFT_FOOT_DELTA = 28.0
+WALK_LIFT_KNEE_DELTA = -19.0
 WALK_HIP_SWING_DEG = 15.0
-WALK_HALF_CYCLE_STEPS = 20
-WALK_FRAME_DELAY = 0.06
-WALK_SETTLE_DELAY = 0.25
+WALK_HALF_CYCLE_STEPS = 10
+WALK_FRAME_DELAY = 0.035
+WALK_SETTLE_DELAY = 0.10
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
