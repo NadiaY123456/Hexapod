@@ -87,9 +87,9 @@ HIP_TRIMS = {
     "leg6": 15.0,
 }
 
-STEP_DELAY = 0.04
+STEP_DELAY = 0.025
 CONTACT_SETTLE_DELAY = 1.0
-STAND_STEPS = 80
+STAND_STEPS = 50
 HIP_START_ANGLE = 90
 
 # IK constants measured from leg assembly.step in millimeters.
@@ -117,13 +117,13 @@ DROP_TO_POSE = [
     DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
     DROP_TO_KNEE_ANGLE - NEUTRALS["leg1"]["knee"],
 ]
-DROP_STEPS = 50
+DROP_STEPS = 30
 
 # Fast tripod gait groups:
 #   tripod A = legs 1, 3, 5
 #   tripod B = legs 2, 4, 6
 WALK_AFTER_STAND = True
-WALK_CYCLES = 4
+WALK_CYCLES = 8
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
 
