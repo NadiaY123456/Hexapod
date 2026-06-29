@@ -130,9 +130,9 @@ TRIPOD_B = ("leg2", "leg4", "leg6")
 WALK_LIFT_FOOT_DELTA = 28.0
 WALK_LIFT_KNEE_DELTA = -19.0
 WALK_HIP_SWING_DEG = 15.0
-WALK_HALF_CYCLE_STEPS = 10
-WALK_FRAME_DELAY = 0.035
-WALK_SETTLE_DELAY = 0.10
+WALK_HALF_CYCLE_STEPS = 7
+WALK_FRAME_DELAY = 0.018
+WALK_SETTLE_DELAY = 0.03
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
