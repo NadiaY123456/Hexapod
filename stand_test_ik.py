@@ -1,4 +1,5 @@
 import math
+import sys
 import time
 from adafruit_servokit import ServoKit
 
@@ -122,7 +123,8 @@ DROP_STEPS = 30
 # Fast tripod gait groups:
 #   tripod A = legs 1, 3, 5
 #   tripod B = legs 2, 4, 6
-WALK_AFTER_STAND = True
+WALK_AFTER_STAND = False
+KEYBOARD_WALK_AFTER_STAND = True
 WALK_CYCLES = 8
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
@@ -144,6 +146,7 @@ HIP_SWING_SCALE = {
 WALK_HALF_CYCLE_STEPS = 7
 WALK_FRAME_DELAY = 0.018
 WALK_SETTLE_DELAY = 0.03
+KEY_RELEASE_TIMEOUT = 0.25
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
@@ -390,11 +393,66 @@ def ik_lift_from_contact(contact_pose, body_lift, steps=STAND_STEPS):
     return previous_pose
 
 
-def set_walk_frame(home_pose, swing_tripod, stance_tripod, t):
+class KeyboardInput:
+    def __enter__(self):
+        self.is_windows = sys.platform.startswith("win")
+        self.old_settings = None
+
+        if self.is_windows:
+            import msvcrt
+
+            self.msvcrt = msvcrt
+        else:
+            if not sys.stdin.isatty():
+                raise RuntimeError("Keyboard walk needs an interactive terminal.")
+
+            import select
+            import termios
+            import tty
+
+            self.select = select
+            self.termios = termios
+            self.fd = sys.stdin.fileno()
+            self.old_settings = termios.tcgetattr(self.fd)
+            tty.setcbreak(self.fd)
+
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.old_settings is not None:
+            self.termios.tcsetattr(self.fd, self.termios.TCSADRAIN, self.old_settings)
+
+    def read_key(self):
+        if self.is_windows:
+            if self.msvcrt.kbhit():
+                return self.msvcrt.getwch().lower()
+            return None
+
+        readable, _, _ = self.select.select([sys.stdin], [], [], 0)
+        if readable:
+            return sys.stdin.read(1).lower()
+        return None
+
+
+def read_latest_walk_key(keyboard):
+    latest_key = None
+    while True:
+        key = keyboard.read_key()
+        if key is None:
+            return latest_key
+        if key in ("w", "s", "q"):
+            latest_key = key
+
+
+def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
     eased_t = t * t * (3 - 2 * t)
     lift = math.sin(math.pi * t)
-    swing_hip = -WALK_HIP_SWING_DEG + (2 * WALK_HIP_SWING_DEG * eased_t)
-    stance_hip = WALK_HIP_SWING_DEG - (2 * WALK_HIP_SWING_DEG * eased_t)
+    swing_hip = direction * (
+        -WALK_HIP_SWING_DEG + (2 * WALK_HIP_SWING_DEG * eased_t)
+    )
+    stance_hip = direction * (
+        WALK_HIP_SWING_DEG - (2 * WALK_HIP_SWING_DEG * eased_t)
+    )
     swing_foot = home_pose[0] + WALK_LIFT_FOOT_DELTA * lift
     swing_knee = home_pose[1] + WALK_LIFT_KNEE_DELTA * lift
 
@@ -407,17 +465,38 @@ def set_walk_frame(home_pose, swing_tripod, stance_tripod, t):
         set_leg_hip_offset(leg_name, stance_hip * HIP_SWING_SCALE[leg_name])
 
 
+def tripod_start_offsets(direction=1):
+    all_leg_names = tuple(legs.keys())
+    return {
+        leg_name: (
+            direction
+            * (
+                -WALK_HIP_SWING_DEG
+                if leg_name in TRIPOD_A
+                else WALK_HIP_SWING_DEG
+            )
+            * HIP_SWING_SCALE[leg_name]
+        )
+        for leg_name in all_leg_names
+    }
+
+
+def walk_half_cycle(home_pose, swing_tripod, stance_tripod, direction=1):
+    for step in range(WALK_HALF_CYCLE_STEPS + 1):
+        set_walk_frame(
+            home_pose,
+            swing_tripod,
+            stance_tripod,
+            step / WALK_HALF_CYCLE_STEPS,
+            direction=direction,
+        )
+        time.sleep(WALK_FRAME_DELAY)
+
+
 def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
     all_leg_names = tuple(legs.keys())
     hip_center = {leg_name: 0.0 for leg_name in all_leg_names}
-    hip_start = {
-        leg_name: (
-            -WALK_HIP_SWING_DEG
-            if leg_name in TRIPOD_A
-            else WALK_HIP_SWING_DEG
-        ) * HIP_SWING_SCALE[leg_name]
-        for leg_name in all_leg_names
-    }
+    hip_start = tripod_start_offsets(direction=1)
 
     print(
         "Starting fast small-step tripod walk: "
@@ -442,14 +521,10 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
 
     for cycle in range(1, cycles + 1):
         print(f"Walk cycle {cycle}: tripod A swing, tripod B stance")
-        for step in range(WALK_HALF_CYCLE_STEPS + 1):
-            set_walk_frame(home_pose, TRIPOD_A, TRIPOD_B, step / WALK_HALF_CYCLE_STEPS)
-            time.sleep(WALK_FRAME_DELAY)
+        walk_half_cycle(home_pose, TRIPOD_A, TRIPOD_B, direction=1)
 
         print(f"Walk cycle {cycle}: tripod B swing, tripod A stance")
-        for step in range(WALK_HALF_CYCLE_STEPS + 1):
-            set_walk_frame(home_pose, TRIPOD_B, TRIPOD_A, step / WALK_HALF_CYCLE_STEPS)
-            time.sleep(WALK_FRAME_DELAY)
+        walk_half_cycle(home_pose, TRIPOD_B, TRIPOD_A, direction=1)
 
     print("Tripod walk complete.")
     set_all_legs_offsets(home_pose[0], home_pose[1])
@@ -459,6 +534,49 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         steps=WALK_HALF_CYCLE_STEPS,
         delay=WALK_FRAME_DELAY,
     )
+
+
+def keyboard_walk_control(home_pose):
+    next_swing = TRIPOD_A
+    direction = 0
+    last_key_time = 0.0
+
+    print("Keyboard walk ready: hold W to walk forward, hold S to walk backward.")
+    print("Release the key to pause. Press Q to stop and hold standing pose.")
+
+    set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
+    set_all_hip_offsets(0.0, delay=0.0)
+
+    with KeyboardInput() as keyboard:
+        while True:
+            key = read_latest_walk_key(keyboard)
+            now = time.monotonic()
+
+            if key == "q":
+                print("Keyboard walk stopped.")
+                break
+            if key == "w":
+                direction = 1
+                last_key_time = now
+            elif key == "s":
+                direction = -1
+                last_key_time = now
+
+            if direction and now - last_key_time > KEY_RELEASE_TIMEOUT:
+                direction = 0
+                set_all_legs_offsets(home_pose[0], home_pose[1])
+                set_all_hip_offsets(0.0, delay=0.0)
+
+            if not direction:
+                time.sleep(0.02)
+                continue
+
+            stance_tripod = TRIPOD_B if next_swing == TRIPOD_A else TRIPOD_A
+            walk_half_cycle(home_pose, next_swing, stance_tripod, direction=direction)
+            next_swing = stance_tripod
+
+    set_all_legs_offsets(home_pose[0], home_pose[1])
+    set_all_hip_offsets(0.0, delay=0.0)
 
 
 def release_all():
@@ -497,7 +615,13 @@ try:
     print("Step 4: Drop into the 70a7ad9 final pose")
     interpolate_pose(standing_pose, DROP_TO_POSE, steps=DROP_STEPS)
 
-    if WALK_AFTER_STAND:
+    if KEYBOARD_WALK_AFTER_STAND:
+        print("Step 5: Keyboard walking control")
+        try:
+            keyboard_walk_control(DROP_TO_POSE)
+        except RuntimeError as error:
+            print(f"{error} Holding standing pose instead.")
+    elif WALK_AFTER_STAND:
         print("Step 5: Run tripod walking cycles")
         walk_tripod_cycles(DROP_TO_POSE, cycles=WALK_CYCLES)
 
