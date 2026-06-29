@@ -137,10 +137,10 @@ WALK_HIP_SWING_DEG = 15.0
 # scale values between the two sides.
 HIP_SWING_SCALE = {
     "leg1": 1.06,
-    "leg2": 1.06,
+    "leg2": 0.94,
     "leg3": 1.06,
     "leg4": 0.94,
-    "leg5": 0.94,
+    "leg5": 1.06,
     "leg6": 0.94,
 }
 WALK_HALF_CYCLE_STEPS = 7
