@@ -217,10 +217,10 @@ def set_selected_legs_offsets(leg_names, foot_offset, knee_offset):
 
 
 def set_all_hips_to_start_angle(delay=1.0):
-    print(f"Setting all hip/body joints to {HIP_START_ANGLE} degrees once.")
+    print("Setting all hip/body joints to calibrated center.")
 
-    for hip_servo in hips.values():
-        hip_servo.angle = HIP_START_ANGLE
+    for leg_name in hips:
+        set_leg_hip_offset(leg_name, 0.0)
 
     if delay > 0:
         time.sleep(delay)
