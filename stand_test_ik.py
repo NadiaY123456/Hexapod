@@ -84,7 +84,7 @@ HIP_TRIMS = {
     "leg3": 5.0,
     "leg4": 0.0,
     "leg5": 2.0,
-    "leg6": 20.0,
+    "leg6": 0.0,
 }
 
 STEP_DELAY = 0.02
