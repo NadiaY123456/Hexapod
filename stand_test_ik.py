@@ -79,12 +79,12 @@ HIP_DIRECTIONS = {
 }
 
 HIP_TRIMS = {
-    "leg1": 0.0,
+    "leg1": 5.0,
     "leg2": 0.0,
-    "leg3": 0.0,
+    "leg3": 5.0,
     "leg4": 0.0,
-    "leg5": 0.0,
-    "leg6": 0.0,
+    "leg5": 2.0,
+    "leg6": 15.0,
 }
 
 STEP_DELAY = 0.02
