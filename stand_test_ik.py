@@ -136,12 +136,12 @@ WALK_HIP_SWING_DEG = 15.0
 # the 0x41 side a slightly shorter stride. If the veer gets worse, swap these
 # scale values between the two sides.
 HIP_SWING_SCALE = {
-    "leg1": 1.04,
-    "leg2": 0.80,
-    "leg3": 1.04,
-    "leg4": 0.80,
-    "leg5": 1.04,
-    "leg6": 0.80,
+    "leg1": 1.0,
+    "leg2": 1.0,
+    "leg3": 1.0,
+    "leg4": 1.0,
+    "leg5": 1.0,
+    "leg6": 1.0,
 }
 WALK_HALF_CYCLE_STEPS = 7
 WALK_FRAME_DELAY = 0.018
