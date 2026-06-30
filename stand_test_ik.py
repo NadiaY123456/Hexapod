@@ -109,10 +109,11 @@ CONTACT_FOOT_OFFSET = MEASURED_FLAT_FOOT_ANGLE - NEUTRALS["leg1"]["foot"]
 # ground contact point stays planted instead of sliding inward.
 FOOT_OUT_PER_KNEE_DEGREE = 0.34
 KNEE_STAND_EXTRA_DURING_LIFT = 20.0
+FOOT_COMMAND_SHIFT = 90.0
 
 # Final pose from commit 70a7ad9, used as a second-phase drop after the
 # restored 229222f stand-up pose.
-DROP_TO_FOOT_ANGLE = 8.0
+DROP_TO_FOOT_ANGLE = 4.0
 DROP_TO_KNEE_ANGLE = 88.0
 DROP_TO_POSE = [
     DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
@@ -204,7 +205,8 @@ def apply_offset(leg_name, joint_name, offset):
     neutral = NEUTRALS[leg_name][joint_name]
     direction = DIRECTIONS[leg_name][joint_name]
     trim = TRIMS[leg_name][joint_name]
-    return clamp_angle(neutral + direction * offset + trim)
+    command_shift = FOOT_COMMAND_SHIFT if joint_name == "foot" else 0.0
+    return clamp_angle(neutral + direction * offset + trim + command_shift)
 
 
 def set_leg_offsets(leg_name, foot_offset, knee_offset):
