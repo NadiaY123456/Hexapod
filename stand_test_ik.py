@@ -52,8 +52,8 @@ TRIMS = {
     "leg1": {"foot": 8.0, "knee": 0.0},
     "leg2": {"foot": 3.0, "knee": 0.0},
     "leg3": {"foot": 8.0, "knee": 0.0},
-    "leg4": {"foot": 5.0, "knee": 0.0},
-    "leg5": {"foot": 5.5, "knee": 0.0},
+    "leg4": {"foot": 8.0, "knee": -3.0},
+    "leg5": {"foot": 8.5, "knee": -3.0},
     "leg6": {"foot": 8.0, "knee": 0.0},
 }
 
