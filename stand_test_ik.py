@@ -136,12 +136,12 @@ WALK_HIP_SWING_DEG = 15.0
 # Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
 # legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
 HIP_SWING_SCALE = {
-    "leg1": 0.92,
-    "leg2": 1.08,
-    "leg3": 0.92,
-    "leg4": 1.08,
-    "leg5": 0.92,
-    "leg6": 1.08,
+    "leg1": 0.98,
+    "leg2": 1.02,
+    "leg3": 0.98,
+    "leg4": 1.02,
+    "leg5": 0.98,
+    "leg6": 1.02,
 }
 WALK_HALF_CYCLE_STEPS = 14
 WALK_FRAME_DELAY = 0.04
