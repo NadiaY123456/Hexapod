@@ -130,19 +130,19 @@ WALK_CYCLES = 8
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
 
-WALK_LIFT_FOOT_DELTA = 28.0
-WALK_LIFT_KNEE_DELTA = -19.0
+WALK_LIFT_FOOT_DELTA = 34.0
+WALK_LIFT_KNEE_DELTA = -23.0
 WALK_HIP_SWING_DEG = 15.0
-# Left-veer correction: give the 0x40 side a slightly longer hip stride and
-# the 0x41 side a slightly shorter stride. If the veer gets worse, swap these
+# Right-veer correction: give the 0x41 side a slightly longer hip stride and
+# the 0x40 side a slightly shorter stride. If the veer gets worse, swap these
 # scale values between the two sides.
 HIP_SWING_SCALE = {
-    "leg1": 1.06,
-    "leg2": 1.06,
-    "leg3": 1.06,
-    "leg4": 0.94,
-    "leg5": 0.94,
-    "leg6": 0.94,
+    "leg1": 0.94,
+    "leg2": 0.94,
+    "leg3": 0.94,
+    "leg4": 1.06,
+    "leg5": 1.06,
+    "leg6": 1.06,
 }
 WALK_HALF_CYCLE_STEPS = 14
 WALK_FRAME_DELAY = 0.04
