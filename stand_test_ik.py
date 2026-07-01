@@ -50,7 +50,7 @@ DIRECTIONS = {
 #   leg1=21.5, leg2=24.5, leg3=19.5, leg4=21.5, leg5=30.0, leg6=23.5
 TRIMS = {
     "leg1": {"foot": 8.0, "knee": -4.0},
-    "leg2": {"foot": -5.0, "knee": -4.0},
+    "leg2": {"foot": 11.0, "knee": -4.0},
     "leg3": {"foot": 8.0, "knee": -4.0},
     "leg4": {"foot": 8.0, "knee": -7.0},
     "leg5": {"foot": 8.5, "knee": -7.0},
