@@ -151,6 +151,14 @@ HIP_SWING_SCALE = {
     "leg5": 0.98,
     "leg6": 1.02,
 }
+STANCE_HIP_SCALE = {
+    "leg1": 1.0,
+    "leg2": 0.75,
+    "leg3": 1.0,
+    "leg4": 1.0,
+    "leg5": 1.0,
+    "leg6": 1.0,
+}
 WALK_HALF_CYCLE_STEPS = 14
 WALK_FRAME_DELAY = 0.04
 WALK_SETTLE_DELAY = 0.08
@@ -471,7 +479,10 @@ def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
 
     for leg_name in stance_tripod:
         set_leg_offsets(leg_name, home_pose[0], home_pose[1])
-        set_leg_hip_offset(leg_name, stance_hip * HIP_SWING_SCALE[leg_name])
+        set_leg_hip_offset(
+            leg_name,
+            stance_hip * HIP_SWING_SCALE[leg_name] * STANCE_HIP_SCALE[leg_name],
+        )
 
 
 def tripod_start_offsets(direction=1):
@@ -515,6 +526,7 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         "Walk tuning -> "
         f"hip_swing={WALK_HIP_SWING_DEG}, "
         f"hip_scale={HIP_SWING_SCALE}, "
+        f"stance_scale={STANCE_HIP_SCALE}, "
         f"lift_foot={WALK_LIFT_FOOT_DELTA}, "
         f"lift_knee={WALK_LIFT_KNEE_DELTA}, "
         f"steps={WALK_HALF_CYCLE_STEPS}, delay={WALK_FRAME_DELAY}"
