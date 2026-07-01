@@ -133,16 +133,15 @@ TRIPOD_B = ("leg2", "leg4", "leg6")
 WALK_LIFT_FOOT_DELTA = 34.0
 WALK_LIFT_KNEE_DELTA = -23.0
 WALK_HIP_SWING_DEG = 15.0
-# Right-veer correction: give the 0x41 side a slightly longer hip stride and
-# the 0x40 side a slightly shorter stride. If the veer gets worse, swap these
-# scale values between the two sides.
+# Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
+# legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
 HIP_SWING_SCALE = {
-    "leg1": 0.94,
-    "leg2": 0.94,
-    "leg3": 0.94,
-    "leg4": 1.06,
-    "leg5": 1.06,
-    "leg6": 1.06,
+    "leg1": 0.92,
+    "leg2": 1.08,
+    "leg3": 0.92,
+    "leg4": 1.08,
+    "leg5": 0.92,
+    "leg6": 1.08,
 }
 WALK_HALF_CYCLE_STEPS = 14
 WALK_FRAME_DELAY = 0.04
