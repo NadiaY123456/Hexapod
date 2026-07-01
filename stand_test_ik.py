@@ -51,10 +51,10 @@ DIRECTIONS = {
 TRIMS = {
     "leg1": {"foot": 8.0, "knee": -4.0},
     "leg2": {"foot": 11.0, "knee": -4.0},
-    "leg3": {"foot": 8.0, "knee": -4.0},
+    "leg3": {"foot": 8.0, "knee": 0.0},
     "leg4": {"foot": 8.0, "knee": -7.0},
     "leg5": {"foot": 8.5, "knee": -7.0},
-    "leg6": {"foot": 8.0, "knee": -4.0},
+    "leg6": {"foot": 8.0, "knee": 4.0},
 }
 
 # Hip/body yaw calibration for walking. Legs 1-3 and 4-6 are assumed to be on
