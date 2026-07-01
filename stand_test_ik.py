@@ -132,6 +132,14 @@ TRIPOD_B = ("leg2", "leg4", "leg6")
 
 WALK_LIFT_FOOT_DELTA = 34.0
 WALK_LIFT_KNEE_DELTA = -23.0
+WALK_LIFT_SCALE = {
+    "leg1": 1.0,
+    "leg2": 1.0,
+    "leg3": 1.18,
+    "leg4": 1.0,
+    "leg5": 1.0,
+    "leg6": 1.0,
+}
 WALK_HIP_SWING_DEG = 15.0
 # Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
 # legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
@@ -454,10 +462,10 @@ def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
     stance_hip = direction * (
         WALK_HIP_SWING_DEG - (2 * WALK_HIP_SWING_DEG * eased_t)
     )
-    swing_foot = home_pose[0] + WALK_LIFT_FOOT_DELTA * lift
-    swing_knee = home_pose[1] + WALK_LIFT_KNEE_DELTA * lift
-
     for leg_name in swing_tripod:
+        leg_lift = lift * WALK_LIFT_SCALE[leg_name]
+        swing_foot = home_pose[0] + WALK_LIFT_FOOT_DELTA * leg_lift
+        swing_knee = home_pose[1] + WALK_LIFT_KNEE_DELTA * leg_lift
         set_leg_offsets(leg_name, swing_foot, swing_knee)
         set_leg_hip_offset(leg_name, swing_hip * HIP_SWING_SCALE[leg_name])
 
