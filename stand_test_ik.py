@@ -113,7 +113,7 @@ FOOT_COMMAND_SHIFT = 90.0
 
 # Final pose from commit 70a7ad9, used as a second-phase drop after the
 # restored 229222f stand-up pose.
-DROP_TO_FOOT_ANGLE = 4.0
+DROP_TO_FOOT_ANGLE = 10.0
 DROP_TO_KNEE_ANGLE = 88.0
 DROP_TO_POSE = [
     DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
