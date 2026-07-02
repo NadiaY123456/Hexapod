@@ -151,9 +151,17 @@ HIP_SWING_SCALE = {
     "leg5": 0.98,
     "leg6": 1.02,
 }
+BACKWARD_HIP_SWING_SCALE = {
+    "leg1": 1.02,
+    "leg2": 0.98,
+    "leg3": 1.02,
+    "leg4": 0.98,
+    "leg5": 1.02,
+    "leg6": 0.98,
+}
 STANCE_HIP_SCALE = {
     "leg1": 1.0,
-    "leg2": 0.55,
+    "leg2": 0.70,
     "leg3": 1.0,
     "leg4": 1.0,
     "leg5": 1.0,
@@ -471,17 +479,25 @@ def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
         WALK_HIP_SWING_DEG - (2 * WALK_HIP_SWING_DEG * eased_t)
     )
     for leg_name in swing_tripod:
+        direction_scale = BACKWARD_HIP_SWING_SCALE[leg_name] if direction < 0 else 1.0
         leg_lift = lift * WALK_LIFT_SCALE[leg_name]
         swing_foot = home_pose[0] + WALK_LIFT_FOOT_DELTA * leg_lift
         swing_knee = home_pose[1] + WALK_LIFT_KNEE_DELTA * leg_lift
         set_leg_offsets(leg_name, swing_foot, swing_knee)
-        set_leg_hip_offset(leg_name, swing_hip * HIP_SWING_SCALE[leg_name])
+        set_leg_hip_offset(
+            leg_name,
+            swing_hip * HIP_SWING_SCALE[leg_name] * direction_scale,
+        )
 
     for leg_name in stance_tripod:
+        direction_scale = BACKWARD_HIP_SWING_SCALE[leg_name] if direction < 0 else 1.0
         set_leg_offsets(leg_name, home_pose[0], home_pose[1])
         set_leg_hip_offset(
             leg_name,
-            stance_hip * HIP_SWING_SCALE[leg_name] * STANCE_HIP_SCALE[leg_name],
+            stance_hip
+            * HIP_SWING_SCALE[leg_name]
+            * direction_scale
+            * STANCE_HIP_SCALE[leg_name],
         )
 
 
@@ -526,6 +542,7 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         "Walk tuning -> "
         f"hip_swing={WALK_HIP_SWING_DEG}, "
         f"hip_scale={HIP_SWING_SCALE}, "
+        f"backward_scale={BACKWARD_HIP_SWING_SCALE}, "
         f"stance_scale={STANCE_HIP_SCALE}, "
         f"lift_foot={WALK_LIFT_FOOT_DELTA}, "
         f"lift_knee={WALK_LIFT_KNEE_DELTA}, "
