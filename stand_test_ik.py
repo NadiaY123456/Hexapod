@@ -156,7 +156,7 @@ STANCE_HIP_SCALE = {
     "leg2": 0.5,
     "leg3": 1.0,
     "leg4": 1.0,
-    "leg5": 0.5,
+    "leg5": 1.0,
     "leg6": 1.0,
 }
 WALK_HALF_CYCLE_STEPS = 14
