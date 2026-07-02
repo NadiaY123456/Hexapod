@@ -159,6 +159,14 @@ BACKWARD_HIP_SWING_SCALE = {
     "leg5": 0.96,
     "leg6": 1.04,
 }
+LATERAL_HIP_SWING_SCALE = {
+    "leg1": 1.0,
+    "leg2": 0.0,
+    "leg3": -1.0,
+    "leg4": 1.0,
+    "leg5": 0.0,
+    "leg6": -1.0,
+}
 STANCE_HIP_SCALE = {
     "leg1": 1.0,
     "leg2": 0.70,
@@ -465,38 +473,47 @@ def read_latest_walk_key(keyboard):
         key = keyboard.read_key()
         if key is None:
             return latest_key
-        if key in ("w", "s", "q"):
+        if key in ("w", "a", "s", "d", "q"):
             latest_key = key
+
+
+def hip_motion_scale(leg_name, direction):
+    if direction in (-1, 1):
+        direction_scale = BACKWARD_HIP_SWING_SCALE[leg_name] if direction < 0 else 1.0
+        return direction * direction_scale
+
+    if direction in (-2, 2):
+        lateral_direction = 1 if direction > 0 else -1
+        return lateral_direction * LATERAL_HIP_SWING_SCALE[leg_name]
+
+    return 0.0
 
 
 def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
     eased_t = t * t * (3 - 2 * t)
     lift = math.sin(math.pi * t)
-    swing_hip = direction * (
-        -WALK_HIP_SWING_DEG + (2 * WALK_HIP_SWING_DEG * eased_t)
-    )
-    stance_hip = direction * (
-        WALK_HIP_SWING_DEG - (2 * WALK_HIP_SWING_DEG * eased_t)
-    )
+    swing_hip = -WALK_HIP_SWING_DEG + (2 * WALK_HIP_SWING_DEG * eased_t)
+    stance_hip = WALK_HIP_SWING_DEG - (2 * WALK_HIP_SWING_DEG * eased_t)
+
     for leg_name in swing_tripod:
-        direction_scale = BACKWARD_HIP_SWING_SCALE[leg_name] if direction < 0 else 1.0
+        hip_scale = hip_motion_scale(leg_name, direction)
         leg_lift = lift * WALK_LIFT_SCALE[leg_name]
         swing_foot = home_pose[0] + WALK_LIFT_FOOT_DELTA * leg_lift
         swing_knee = home_pose[1] + WALK_LIFT_KNEE_DELTA * leg_lift
         set_leg_offsets(leg_name, swing_foot, swing_knee)
         set_leg_hip_offset(
             leg_name,
-            swing_hip * HIP_SWING_SCALE[leg_name] * direction_scale,
+            swing_hip * HIP_SWING_SCALE[leg_name] * hip_scale,
         )
 
     for leg_name in stance_tripod:
-        direction_scale = BACKWARD_HIP_SWING_SCALE[leg_name] if direction < 0 else 1.0
+        hip_scale = hip_motion_scale(leg_name, direction)
         set_leg_offsets(leg_name, home_pose[0], home_pose[1])
         set_leg_hip_offset(
             leg_name,
             stance_hip
             * HIP_SWING_SCALE[leg_name]
-            * direction_scale
+            * hip_scale
             * STANCE_HIP_SCALE[leg_name],
         )
 
@@ -543,6 +560,7 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         f"hip_swing={WALK_HIP_SWING_DEG}, "
         f"hip_scale={HIP_SWING_SCALE}, "
         f"backward_scale={BACKWARD_HIP_SWING_SCALE}, "
+        f"lateral_scale={LATERAL_HIP_SWING_SCALE}, "
         f"stance_scale={STANCE_HIP_SCALE}, "
         f"lift_foot={WALK_LIFT_FOOT_DELTA}, "
         f"lift_knee={WALK_LIFT_KNEE_DELTA}, "
@@ -579,7 +597,10 @@ def keyboard_walk_control(home_pose):
     direction = 0
     last_key_time = 0.0
 
-    print("Keyboard walk ready: hold W to walk forward, hold S to walk backward.")
+    print(
+        "Keyboard walk ready: hold W/S to walk forward/backward, "
+        "A/D to step left/right."
+    )
     print("Release the key to pause. Press Q to stop and hold standing pose.")
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
@@ -598,6 +619,12 @@ def keyboard_walk_control(home_pose):
                 last_key_time = now
             elif key == "s":
                 direction = -1
+                last_key_time = now
+            elif key == "a":
+                direction = 2
+                last_key_time = now
+            elif key == "d":
+                direction = -2
                 last_key_time = now
 
             if direction and now - last_key_time > KEY_RELEASE_TIMEOUT:
