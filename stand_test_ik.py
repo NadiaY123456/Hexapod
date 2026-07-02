@@ -170,7 +170,7 @@ STANCE_HIP_SCALE = {
 WALK_HALF_CYCLE_STEPS = 8
 WALK_FRAME_DELAY = 0.025
 WALK_SETTLE_DELAY = 0.04
-KEY_RELEASE_TIMEOUT = 0.16
+KEY_RELEASE_TIMEOUT = 0.45
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
