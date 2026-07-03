@@ -192,6 +192,7 @@ WALK_HALF_CYCLE_STEPS = 8
 WALK_FRAME_DELAY = 0.025
 WALK_SETTLE_DELAY = 0.04
 
+JS_EVENT_BUTTON = 0x01
 JS_EVENT_AXIS = 0x02
 JS_EVENT_INIT = 0x80
 AXIS_MIN = -32767
@@ -200,6 +201,7 @@ DPAD_THRESHOLD = 0.50
 DPAD_AXES = (6, 7)
 RIGHT_STICK_AXES = (2, 3)
 RIGHT_STICK_DEADZONE = 0.35
+X_BUTTON_NUMBERS = (2,)
 DEFAULT_CONTROLLER_DEVICE = "/dev/input/js0"
 
 # Model angles for the 90-degree starting pose.
@@ -554,13 +556,21 @@ def controller_direction(controller):
     return dpad_direction(controller.axis_values), None
 
 
+def movement_controls_centered(axis_values):
+    return (
+        dpad_direction(axis_values) == 0
+        and right_stick_rotation(axis_values)[0] == 0
+    )
+
+
 def read_latest_controller_direction(controller):
     latest_command = None
+    stop_requested = False
 
     while True:
         event = controller.read_event()
         if event is None:
-            return latest_command
+            return latest_command, stop_requested
 
         _, raw_value, event_type, number = event
         event_type_without_init = event_type & ~JS_EVENT_INIT
@@ -570,6 +580,12 @@ def read_latest_controller_direction(controller):
         ):
             controller.axis_values[number] = normalize_axis(raw_value)
             latest_command = controller_direction(controller)
+        elif (
+            event_type_without_init == JS_EVENT_BUTTON
+            and number in X_BUTTON_NUMBERS
+            and raw_value
+        ):
+            stop_requested = True
 
 
 def hip_motion_scale(leg_name, direction):
@@ -705,12 +721,14 @@ def controller_walk_control(home_pose, device_path):
     direction = 0
     last_reported_direction = None
     is_centered = True
+    movement_locked = False
 
     print(
         "Controller walk ready: hold D-pad up/down to walk forward/backward, "
         "left/right to strafe."
     )
     print("Push the right stick left/right to rotate in place.")
+    print("Press X to safety-stop and keep standing.")
     print("Release the D-pad and right stick to pause. Press Ctrl+C to stop.")
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
@@ -718,7 +736,26 @@ def controller_walk_control(home_pose, device_path):
 
     with ControllerInput(device_path) as controller:
         while True:
-            latest_command = read_latest_controller_direction(controller)
+            latest_command, stop_requested = read_latest_controller_direction(controller)
+
+            if stop_requested:
+                direction = 0
+                movement_locked = True
+                print("X safety stop: holding standing pose.")
+                last_reported_direction = direction
+
+            if movement_locked:
+                if not is_centered:
+                    set_all_legs_offsets(home_pose[0], home_pose[1])
+                    set_all_hip_offsets(0.0, delay=0.0)
+                    is_centered = True
+
+                if movement_controls_centered(controller.axis_values):
+                    movement_locked = False
+                    print("Movement controls centered. Controller walk ready.")
+
+                time.sleep(0.02)
+                continue
 
             if latest_command is not None:
                 direction, angle = latest_command
