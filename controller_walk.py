@@ -146,6 +146,7 @@ WALK_LIFT_SCALE = {
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
 ROTATE_HIP_SWING_DEG = 18.0
+STEER_WHILE_WALKING_AMOUNT = 0.85
 # Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
 # legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
 HIP_SWING_SCALE = {
@@ -199,6 +200,8 @@ AXIS_MIN = -32767
 AXIS_MAX = 32767
 DPAD_THRESHOLD = 0.50
 DPAD_AXES = (6, 7)
+LEFT_STICK_AXES = (0, 1)
+LEFT_STICK_DEADZONE = 0.25
 RIGHT_STICK_AXES = (2, 3)
 RIGHT_STICK_DEADZONE = 0.35
 X_BUTTON_NUMBERS = (2,)
@@ -463,6 +466,8 @@ class ControllerInput:
         self.axis_values = {
             DPAD_AXES[0]: 0.0,
             DPAD_AXES[1]: 0.0,
+            LEFT_STICK_AXES[0]: 0.0,
+            LEFT_STICK_AXES[1]: 0.0,
             RIGHT_STICK_AXES[0]: 0.0,
             RIGHT_STICK_AXES[1]: 0.0,
         }
@@ -533,6 +538,18 @@ def right_stick_rotation(axis_values):
     return -3, angle
 
 
+def left_stick_steered_walk(axis_values):
+    x = axis_values.get(LEFT_STICK_AXES[0], 0.0)
+    y = axis_values.get(LEFT_STICK_AXES[1], 0.0)
+    magnitude = min(1.0, math.hypot(x, y))
+
+    if magnitude < LEFT_STICK_DEADZONE:
+        return 0, None, 0.0
+
+    angle = stick_angle_degrees(x, y)
+    return 4, angle, max(-1.0, min(1.0, x))
+
+
 def direction_name(direction, angle=None):
     names = {
         1: "forward",
@@ -541,24 +558,33 @@ def direction_name(direction, angle=None):
         -2: "right",
         3: "rotate left",
         -3: "rotate right",
+        4: "steered forward",
         0: "paused",
     }
-    if angle is None or direction not in (-3, 3):
+    if angle is None or direction not in (-3, 3, 4):
         return names[direction]
-    return f"{names[direction]} (right stick angle {angle:.1f})"
+    stick_name = "left stick" if direction == 4 else "right stick"
+    return f"{names[direction]} ({stick_name} angle {angle:.1f})"
 
 
 def controller_direction(controller):
     rotate_direction, rotate_angle = right_stick_rotation(controller.axis_values)
     if rotate_direction:
-        return rotate_direction, rotate_angle
+        return rotate_direction, rotate_angle, 0.0
 
-    return dpad_direction(controller.axis_values), None
+    walk_direction, walk_angle, steering = left_stick_steered_walk(
+        controller.axis_values
+    )
+    if walk_direction:
+        return walk_direction, walk_angle, steering
+
+    return dpad_direction(controller.axis_values), None, 0.0
 
 
 def movement_controls_centered(axis_values):
     return (
         dpad_direction(axis_values) == 0
+        and left_stick_steered_walk(axis_values)[0] == 0
         and right_stick_rotation(axis_values)[0] == 0
     )
 
@@ -576,7 +602,7 @@ def read_latest_controller_direction(controller):
         event_type_without_init = event_type & ~JS_EVENT_INIT
 
         if event_type_without_init == JS_EVENT_AXIS and number in (
-            DPAD_AXES + RIGHT_STICK_AXES
+            DPAD_AXES + LEFT_STICK_AXES + RIGHT_STICK_AXES
         ):
             controller.axis_values[number] = normalize_axis(raw_value)
             latest_command = controller_direction(controller)
@@ -588,7 +614,11 @@ def read_latest_controller_direction(controller):
             stop_requested = True
 
 
-def hip_motion_scale(leg_name, direction):
+def hip_motion_scale(leg_name, direction, steering=0.0):
+    if direction == 4:
+        turn_bias = steering * STEER_WHILE_WALKING_AMOUNT
+        return 1.0 + turn_bias * ROTATE_HIP_SWING_SCALE[leg_name]
+
     if direction in (-1, 1):
         direction_scale = BACKWARD_HIP_SWING_SCALE[leg_name] if direction < 0 else 1.0
         return direction * direction_scale
@@ -604,7 +634,14 @@ def hip_motion_scale(leg_name, direction):
     return 0.0
 
 
-def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
+def set_walk_frame(
+    home_pose,
+    swing_tripod,
+    stance_tripod,
+    t,
+    direction=1,
+    steering=0.0,
+):
     eased_t = t * t * (3 - 2 * t)
     lift = math.sin(math.pi * t)
     if direction in (-2, 2):
@@ -617,7 +654,7 @@ def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
     stance_hip = hip_swing - (2 * hip_swing * eased_t)
 
     for leg_name in swing_tripod:
-        hip_scale = hip_motion_scale(leg_name, direction)
+        hip_scale = hip_motion_scale(leg_name, direction, steering)
         leg_lift = lift * WALK_LIFT_SCALE[leg_name]
         swing_foot = home_pose[0] + WALK_LIFT_FOOT_DELTA * leg_lift
         swing_knee = home_pose[1] + WALK_LIFT_KNEE_DELTA * leg_lift
@@ -628,7 +665,7 @@ def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
         )
 
     for leg_name in stance_tripod:
-        hip_scale = hip_motion_scale(leg_name, direction)
+        hip_scale = hip_motion_scale(leg_name, direction, steering)
         set_leg_offsets(leg_name, home_pose[0], home_pose[1])
         set_leg_hip_offset(
             leg_name,
@@ -655,7 +692,7 @@ def tripod_start_offsets(direction=1):
     }
 
 
-def walk_half_cycle(home_pose, swing_tripod, stance_tripod, direction=1):
+def walk_half_cycle(home_pose, swing_tripod, stance_tripod, direction=1, steering=0.0):
     for step in range(WALK_HALF_CYCLE_STEPS + 1):
         set_walk_frame(
             home_pose,
@@ -663,6 +700,7 @@ def walk_half_cycle(home_pose, swing_tripod, stance_tripod, direction=1):
             stance_tripod,
             step / WALK_HALF_CYCLE_STEPS,
             direction=direction,
+            steering=steering,
         )
         time.sleep(WALK_FRAME_DELAY)
 
@@ -681,6 +719,7 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         f"hip_swing={WALK_HIP_SWING_DEG}, "
         f"lateral_hip_swing={LATERAL_HIP_SWING_DEG}, "
         f"rotate_hip_swing={ROTATE_HIP_SWING_DEG}, "
+        f"steer_while_walking={STEER_WHILE_WALKING_AMOUNT}, "
         f"hip_scale={HIP_SWING_SCALE}, "
         f"backward_scale={BACKWARD_HIP_SWING_SCALE}, "
         f"lateral_scale={LATERAL_HIP_SWING_SCALE}, "
@@ -719,7 +758,9 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
 def controller_walk_control(home_pose, device_path):
     next_swing = TRIPOD_A
     direction = 0
+    steering = 0.0
     last_reported_direction = None
+    last_reported_steering = None
     is_centered = True
     movement_locked = False
 
@@ -727,9 +768,10 @@ def controller_walk_control(home_pose, device_path):
         "Controller walk ready: hold D-pad up/down to walk forward/backward, "
         "left/right to strafe."
     )
+    print("Push the left stick to walk forward while steering.")
     print("Push the right stick left/right to rotate in place.")
     print("Press X to safety-stop and keep standing.")
-    print("Release the D-pad and right stick to pause. Press Ctrl+C to stop.")
+    print("Release movement controls to pause. Press Ctrl+C to stop.")
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
     set_all_hip_offsets(0.0, delay=0.0)
@@ -740,9 +782,11 @@ def controller_walk_control(home_pose, device_path):
 
             if stop_requested:
                 direction = 0
+                steering = 0.0
                 movement_locked = True
                 print("X safety stop: holding standing pose.")
                 last_reported_direction = direction
+                last_reported_steering = steering
 
             if movement_locked:
                 if not is_centered:
@@ -758,11 +802,26 @@ def controller_walk_control(home_pose, device_path):
                 continue
 
             if latest_command is not None:
-                direction, angle = latest_command
+                direction, angle, steering = latest_command
 
-                if direction != last_reported_direction:
-                    print(f"Controller direction: {direction_name(direction, angle)}")
+                steering_changed = (
+                    last_reported_steering is None
+                    or abs(steering - last_reported_steering) >= 0.20
+                )
+                if direction != last_reported_direction or (
+                    direction == 4 and steering_changed
+                ):
+                    if direction == 4:
+                        print(
+                            "Controller direction: "
+                            f"{direction_name(direction, angle)}, steering {steering:.2f}"
+                        )
+                    else:
+                        print(
+                            f"Controller direction: {direction_name(direction, angle)}"
+                        )
                     last_reported_direction = direction
+                    last_reported_steering = steering
 
             if not direction:
                 if not is_centered:
@@ -774,7 +833,13 @@ def controller_walk_control(home_pose, device_path):
 
             is_centered = False
             stance_tripod = TRIPOD_B if next_swing == TRIPOD_A else TRIPOD_A
-            walk_half_cycle(home_pose, next_swing, stance_tripod, direction=direction)
+            walk_half_cycle(
+                home_pose,
+                next_swing,
+                stance_tripod,
+                direction=direction,
+                steering=steering,
+            )
             next_swing = stance_tripod
 
     set_all_legs_offsets(home_pose[0], home_pose[1])
