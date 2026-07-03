@@ -696,11 +696,8 @@ def release_all():
         hip_servo.angle = None
 
 
-try:
-    args = parse_args()
-    validate_ik_constants()
-
-    print("Starting IK stand-up sequence.")
+def run_stand_up_sequence():
+    print("Starting IK stand-up sequence from stand_test_ik.")
     print("Foot and knee joints move during stand-up.")
     print("Hip/body joints are centered during stand-up and sweep during walking.")
     print("Be ready to unplug power if anything binds or tips.")
@@ -724,10 +721,19 @@ try:
     print("Step 4: Drop into the 70a7ad9 final pose")
     interpolate_pose(standing_pose, DROP_TO_POSE, steps=DROP_STEPS)
 
+    return DROP_TO_POSE
+
+
+try:
+    args = parse_args()
+    validate_ik_constants()
+
+    walk_home_pose = run_stand_up_sequence()
+
     if CONTROLLER_WALK_AFTER_STAND:
         print("Step 5: Controller walking control")
         try:
-            controller_walk_control(DROP_TO_POSE, args.device)
+            controller_walk_control(walk_home_pose, args.device)
         except RuntimeError as error:
             print(f"{error} Holding standing pose instead.")
     elif WALK_AFTER_STAND:
