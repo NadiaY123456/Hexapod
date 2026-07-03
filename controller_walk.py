@@ -705,6 +705,11 @@ def walk_half_cycle(home_pose, swing_tripod, stance_tripod, direction=1, steerin
         time.sleep(WALK_FRAME_DELAY)
 
 
+def hold_standing_pose(home_pose):
+    set_all_legs_offsets(home_pose[0], home_pose[1])
+    set_all_hip_offsets(0.0, delay=0.0)
+
+
 def poll_controller_motion(controller, direction, steering):
     latest_command, stop_requested = read_latest_controller_direction(controller)
 
@@ -736,6 +741,7 @@ def controller_walk_half_cycle(
         )
 
         if stop_requested or not direction:
+            hold_standing_pose(home_pose)
             return direction, steering, stop_requested, False
 
         set_walk_frame(
@@ -836,8 +842,7 @@ def controller_walk_control(home_pose, device_path):
 
             if movement_locked:
                 if not is_centered:
-                    set_all_legs_offsets(home_pose[0], home_pose[1])
-                    set_all_hip_offsets(0.0, delay=0.0)
+                    hold_standing_pose(home_pose)
                     is_centered = True
 
                 if movement_controls_centered(controller.axis_values):
@@ -879,8 +884,7 @@ def controller_walk_control(home_pose, device_path):
 
             if not direction:
                 if not is_centered:
-                    set_all_legs_offsets(home_pose[0], home_pose[1])
-                    set_all_hip_offsets(0.0, delay=0.0)
+                    hold_standing_pose(home_pose)
                     is_centered = True
                 time.sleep(0.02)
                 continue
@@ -905,8 +909,7 @@ def controller_walk_control(home_pose, device_path):
                 last_reported_steering = steering
 
             if not direction:
-                set_all_legs_offsets(home_pose[0], home_pose[1])
-                set_all_hip_offsets(0.0, delay=0.0)
+                hold_standing_pose(home_pose)
                 is_centered = True
                 if last_reported_direction not in (None, 0):
                     print("Controller direction: paused")
@@ -917,8 +920,7 @@ def controller_walk_control(home_pose, device_path):
             if cycle_complete:
                 next_swing = stance_tripod
 
-    set_all_legs_offsets(home_pose[0], home_pose[1])
-    set_all_hip_offsets(0.0, delay=0.0)
+    hold_standing_pose(home_pose)
 
 
 def parse_args():
