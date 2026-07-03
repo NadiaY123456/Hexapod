@@ -145,6 +145,7 @@ WALK_LIFT_SCALE = {
 }
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
+ROTATE_HIP_SWING_DEG = 18.0
 # Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
 # legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
 HIP_SWING_SCALE = {
@@ -171,6 +172,14 @@ LATERAL_HIP_SWING_SCALE = {
     "leg5": 0.0,
     "leg6": -1.0,
 }
+ROTATE_HIP_SWING_SCALE = {
+    "leg1": 1.0,
+    "leg2": 1.0,
+    "leg3": 1.0,
+    "leg4": -1.0,
+    "leg5": -1.0,
+    "leg6": -1.0,
+}
 STANCE_HIP_SCALE = {
     "leg1": 1.0,
     "leg2": 0.60,
@@ -189,6 +198,8 @@ AXIS_MIN = -32767
 AXIS_MAX = 32767
 DPAD_THRESHOLD = 0.50
 DPAD_AXES = (6, 7)
+RIGHT_STICK_AXES = (2, 3)
+RIGHT_STICK_DEADZONE = 0.35
 DEFAULT_CONTROLLER_DEVICE = "/dev/input/js0"
 
 # Model angles for the 90-degree starting pose.
@@ -447,7 +458,12 @@ class ControllerInput:
     def __init__(self, device_path):
         self.device_path = device_path
         self.controller = None
-        self.axis_values = {DPAD_AXES[0]: 0.0, DPAD_AXES[1]: 0.0}
+        self.axis_values = {
+            DPAD_AXES[0]: 0.0,
+            DPAD_AXES[1]: 0.0,
+            RIGHT_STICK_AXES[0]: 0.0,
+            RIGHT_STICK_AXES[1]: 0.0,
+        }
 
     def __enter__(self):
         while True:
@@ -490,31 +506,70 @@ def dpad_direction(axis_values):
     return 0
 
 
-def direction_name(direction):
+def stick_angle_degrees(x, y):
+    # Linux joystick y is usually negative when pushed up.
+    angle = math.degrees(math.atan2(x, -y))
+    if angle > 180:
+        return angle - 360
+    if angle <= -180:
+        return angle + 360
+    return angle
+
+
+def right_stick_rotation(axis_values):
+    x = axis_values.get(RIGHT_STICK_AXES[0], 0.0)
+    y = axis_values.get(RIGHT_STICK_AXES[1], 0.0)
+    magnitude = min(1.0, math.hypot(x, y))
+
+    if magnitude < RIGHT_STICK_DEADZONE:
+        return 0, None
+
+    angle = stick_angle_degrees(x, y)
+    if x >= 0:
+        return -3, angle
+
+    return 3, angle
+
+
+def direction_name(direction, angle=None):
     names = {
         1: "forward",
         -1: "backward",
         2: "left",
         -2: "right",
+        3: "rotate left",
+        -3: "rotate right",
         0: "paused",
     }
-    return names[direction]
+    if angle is None or direction not in (-3, 3):
+        return names[direction]
+    return f"{names[direction]} (right stick angle {angle:.1f})"
+
+
+def controller_direction(controller):
+    rotate_direction, rotate_angle = right_stick_rotation(controller.axis_values)
+    if rotate_direction:
+        return rotate_direction, rotate_angle
+
+    return dpad_direction(controller.axis_values), None
 
 
 def read_latest_controller_direction(controller):
-    latest_direction = None
+    latest_command = None
 
     while True:
         event = controller.read_event()
         if event is None:
-            return latest_direction
+            return latest_command
 
         _, raw_value, event_type, number = event
         event_type_without_init = event_type & ~JS_EVENT_INIT
 
-        if event_type_without_init == JS_EVENT_AXIS and number in DPAD_AXES:
+        if event_type_without_init == JS_EVENT_AXIS and number in (
+            DPAD_AXES + RIGHT_STICK_AXES
+        ):
             controller.axis_values[number] = normalize_axis(raw_value)
-            latest_direction = dpad_direction(controller.axis_values)
+            latest_command = controller_direction(controller)
 
 
 def hip_motion_scale(leg_name, direction):
@@ -526,13 +581,22 @@ def hip_motion_scale(leg_name, direction):
         lateral_direction = 1 if direction > 0 else -1
         return lateral_direction * LATERAL_HIP_SWING_SCALE[leg_name]
 
+    if direction in (-3, 3):
+        rotate_direction = 1 if direction > 0 else -1
+        return rotate_direction * ROTATE_HIP_SWING_SCALE[leg_name]
+
     return 0.0
 
 
 def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
     eased_t = t * t * (3 - 2 * t)
     lift = math.sin(math.pi * t)
-    hip_swing = LATERAL_HIP_SWING_DEG if direction in (-2, 2) else WALK_HIP_SWING_DEG
+    if direction in (-2, 2):
+        hip_swing = LATERAL_HIP_SWING_DEG
+    elif direction in (-3, 3):
+        hip_swing = ROTATE_HIP_SWING_DEG
+    else:
+        hip_swing = WALK_HIP_SWING_DEG
     swing_hip = -hip_swing + (2 * hip_swing * eased_t)
     stance_hip = hip_swing - (2 * hip_swing * eased_t)
 
@@ -600,9 +664,11 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         "Walk tuning -> "
         f"hip_swing={WALK_HIP_SWING_DEG}, "
         f"lateral_hip_swing={LATERAL_HIP_SWING_DEG}, "
+        f"rotate_hip_swing={ROTATE_HIP_SWING_DEG}, "
         f"hip_scale={HIP_SWING_SCALE}, "
         f"backward_scale={BACKWARD_HIP_SWING_SCALE}, "
         f"lateral_scale={LATERAL_HIP_SWING_SCALE}, "
+        f"rotate_scale={ROTATE_HIP_SWING_SCALE}, "
         f"stance_scale={STANCE_HIP_SCALE}, "
         f"lift_foot={WALK_LIFT_FOOT_DELTA}, "
         f"lift_knee={WALK_LIFT_KNEE_DELTA}, "
@@ -644,20 +710,21 @@ def controller_walk_control(home_pose, device_path):
         "Controller walk ready: hold D-pad up/down to walk forward/backward, "
         "left/right to strafe."
     )
-    print("Release the D-pad to pause. Press Ctrl+C to stop.")
+    print("Push the right stick left/right to rotate in place.")
+    print("Release the D-pad and right stick to pause. Press Ctrl+C to stop.")
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
     set_all_hip_offsets(0.0, delay=0.0)
 
     with ControllerInput(device_path) as controller:
         while True:
-            latest_direction = read_latest_controller_direction(controller)
+            latest_command = read_latest_controller_direction(controller)
 
-            if latest_direction is not None:
-                direction = latest_direction
+            if latest_command is not None:
+                direction, angle = latest_command
 
                 if direction != last_reported_direction:
-                    print(f"D-pad direction: {direction_name(direction)}")
+                    print(f"Controller direction: {direction_name(direction, angle)}")
                     last_reported_direction = direction
 
             if not direction:
