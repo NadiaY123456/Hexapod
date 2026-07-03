@@ -152,12 +152,12 @@ HIP_SWING_SCALE = {
     "leg6": 1.02,
 }
 BACKWARD_HIP_SWING_SCALE = {
-    "leg1": 0.96,
-    "leg2": 1.04,
-    "leg3": 0.96,
-    "leg4": 1.04,
-    "leg5": 0.96,
-    "leg6": 1.04,
+    "leg1": 0.92,
+    "leg2": 1.08,
+    "leg3": 0.92,
+    "leg4": 1.08,
+    "leg5": 0.92,
+    "leg6": 1.08,
 }
 LATERAL_HIP_SWING_SCALE = {
     "leg1": 1.0,
