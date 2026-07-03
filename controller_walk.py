@@ -705,6 +705,52 @@ def walk_half_cycle(home_pose, swing_tripod, stance_tripod, direction=1, steerin
         time.sleep(WALK_FRAME_DELAY)
 
 
+def poll_controller_motion(controller, direction, steering):
+    latest_command, stop_requested = read_latest_controller_direction(controller)
+
+    if stop_requested:
+        return 0, 0.0, True
+
+    if latest_command is not None:
+        direction, _, steering = latest_command
+
+    if movement_controls_centered(controller.axis_values):
+        return 0, 0.0, False
+
+    return direction, steering, False
+
+
+def controller_walk_half_cycle(
+    home_pose,
+    swing_tripod,
+    stance_tripod,
+    controller,
+    direction=1,
+    steering=0.0,
+):
+    for step in range(WALK_HALF_CYCLE_STEPS + 1):
+        direction, steering, stop_requested = poll_controller_motion(
+            controller,
+            direction,
+            steering,
+        )
+
+        if stop_requested or not direction:
+            return direction, steering, stop_requested, False
+
+        set_walk_frame(
+            home_pose,
+            swing_tripod,
+            stance_tripod,
+            step / WALK_HALF_CYCLE_STEPS,
+            direction=direction,
+            steering=steering,
+        )
+        time.sleep(WALK_FRAME_DELAY)
+
+    return direction, steering, False, True
+
+
 def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
     all_leg_names = tuple(legs.keys())
     hip_center = {leg_name: 0.0 for leg_name in all_leg_names}
@@ -841,14 +887,35 @@ def controller_walk_control(home_pose, device_path):
 
             is_centered = False
             stance_tripod = TRIPOD_B if next_swing == TRIPOD_A else TRIPOD_A
-            walk_half_cycle(
+            direction, steering, stop_requested, cycle_complete = controller_walk_half_cycle(
                 home_pose,
                 next_swing,
                 stance_tripod,
+                controller,
                 direction=direction,
                 steering=steering,
             )
-            next_swing = stance_tripod
+
+            if stop_requested:
+                direction = 0
+                steering = 0.0
+                movement_locked = True
+                print("X safety stop: holding standing pose.")
+                last_reported_direction = direction
+                last_reported_steering = steering
+
+            if not direction:
+                set_all_legs_offsets(home_pose[0], home_pose[1])
+                set_all_hip_offsets(0.0, delay=0.0)
+                is_centered = True
+                if last_reported_direction not in (None, 0):
+                    print("Controller direction: paused")
+                    last_reported_direction = 0
+                    last_reported_steering = 0.0
+                continue
+
+            if cycle_complete:
+                next_swing = stance_tripod
 
     set_all_legs_offsets(home_pose[0], home_pose[1])
     set_all_hip_offsets(0.0, delay=0.0)
