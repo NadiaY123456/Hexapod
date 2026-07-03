@@ -205,9 +205,11 @@ LEFT_STICK_AXES = (0, 1)
 LEFT_STICK_DEADZONE = 0.25
 RIGHT_STICK_AXES = (2, 3)
 RIGHT_STICK_DEADZONE = 0.35
+# MSI GC30 Linux joystick button numbers. Physical X reports as 3 on this
+# controller, so leave X unmapped and put stand on physical Y.
 A_BUTTON_NUMBERS = (0,)
-X_BUTTON_NUMBERS = (2,)
-Y_BUTTON_NUMBERS = (3,)
+X_BUTTON_NUMBERS = ()
+Y_BUTTON_NUMBERS = (4,)
 DEFAULT_CONTROLLER_DEVICE = "/dev/input/js0"
 
 # Model angles for the 90-degree starting pose.
@@ -856,7 +858,6 @@ def controller_walk_control(home_pose, device_path):
     print("Push the left stick to walk forward while steering.")
     print("Push the right stick left/right to rotate in place.")
     print("Press A to sit. Press Y to stand.")
-    print("Press X to safety-stop and keep standing.")
     print("Release movement controls to pause. Press Ctrl+C to stop.")
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
