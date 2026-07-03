@@ -823,6 +823,14 @@ def controller_walk_control(home_pose, device_path):
                     last_reported_direction = direction
                     last_reported_steering = steering
 
+            if movement_controls_centered(controller.axis_values):
+                direction = 0
+                steering = 0.0
+                if last_reported_direction not in (None, 0):
+                    print("Controller direction: paused")
+                    last_reported_direction = 0
+                    last_reported_steering = 0.0
+
             if not direction:
                 if not is_centered:
                     set_all_legs_offsets(home_pose[0], home_pose[1])
