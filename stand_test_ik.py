@@ -169,7 +169,7 @@ LATERAL_HIP_SWING_SCALE = {
 }
 STANCE_HIP_SCALE = {
     "leg1": 1.0,
-    "leg2": 0.70,
+    "leg2": 0.90,
     "leg3": 1.0,
     "leg4": 1.0,
     "leg5": 1.0,
