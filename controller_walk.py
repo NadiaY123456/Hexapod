@@ -1,5 +1,8 @@
 import math
-import sys
+import argparse
+import os
+import select
+import struct
 import time
 from adafruit_servokit import ServoKit
 
@@ -125,7 +128,7 @@ DROP_STEPS = 20
 #   tripod A = legs 1, 3, 5
 #   tripod B = legs 2, 4, 6
 WALK_AFTER_STAND = False
-KEYBOARD_WALK_AFTER_STAND = True
+CONTROLLER_WALK_AFTER_STAND = True
 WALK_CYCLES = 8
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
@@ -169,7 +172,7 @@ LATERAL_HIP_SWING_SCALE = {
 }
 STANCE_HIP_SCALE = {
     "leg1": 1.0,
-    "leg2": 0.90,
+    "leg2": 0.70,
     "leg3": 1.0,
     "leg4": 1.0,
     "leg5": 1.0,
@@ -178,7 +181,14 @@ STANCE_HIP_SCALE = {
 WALK_HALF_CYCLE_STEPS = 8
 WALK_FRAME_DELAY = 0.025
 WALK_SETTLE_DELAY = 0.04
-KEY_RELEASE_TIMEOUT = 0.45
+
+JS_EVENT_AXIS = 0x02
+JS_EVENT_INIT = 0x80
+AXIS_MIN = -32767
+AXIS_MAX = 32767
+DPAD_THRESHOLD = 0.50
+DPAD_AXES = (6, 7)
+DEFAULT_CONTROLLER_DEVICE = "/dev/input/js0"
 
 # Model angles for the 90-degree starting pose.
 # 0 degrees means the segment points straight down in the side-plane model.
@@ -426,55 +436,84 @@ def ik_lift_from_contact(contact_pose, body_lift, steps=STAND_STEPS):
     return previous_pose
 
 
-class KeyboardInput:
+def normalize_axis(value):
+    if value < 0:
+        return max(-1.0, value / abs(AXIS_MIN))
+    return min(1.0, value / AXIS_MAX)
+
+
+class ControllerInput:
+    def __init__(self, device_path):
+        self.device_path = device_path
+        self.controller = None
+        self.axis_values = {DPAD_AXES[0]: 0.0, DPAD_AXES[1]: 0.0}
+
     def __enter__(self):
-        self.is_windows = sys.platform.startswith("win")
-        self.old_settings = None
-
-        if self.is_windows:
-            import msvcrt
-
-            self.msvcrt = msvcrt
-        else:
-            if not sys.stdin.isatty():
-                raise RuntimeError("Keyboard walk needs an interactive terminal.")
-
-            import select
-            import termios
-            import tty
-
-            self.select = select
-            self.termios = termios
-            self.fd = sys.stdin.fileno()
-            self.old_settings = termios.tcgetattr(self.fd)
-            tty.setcbreak(self.fd)
-
+        while True:
+            try:
+                self.controller = open(self.device_path, "rb")
+                os.set_blocking(self.controller.fileno(), False)
+                print(f"Controller connected at {self.device_path}.")
+                break
+            except FileNotFoundError:
+                print(f"Waiting for controller at {self.device_path}...")
+                time.sleep(1)
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self.old_settings is not None:
-            self.termios.tcsetattr(self.fd, self.termios.TCSADRAIN, self.old_settings)
+        if self.controller is not None:
+            self.controller.close()
 
-    def read_key(self):
-        if self.is_windows:
-            if self.msvcrt.kbhit():
-                return self.msvcrt.getwch().lower()
-            return None
-
-        readable, _, _ = self.select.select([sys.stdin], [], [], 0)
+    def read_event(self):
+        readable, _, _ = select.select([self.controller], [], [], 0)
         if readable:
-            return sys.stdin.read(1).lower()
+            event = self.controller.read(8)
+            if len(event) == 8:
+                return struct.unpack("IhBB", event)
         return None
 
 
-def read_latest_walk_key(keyboard):
-    latest_key = None
+def dpad_direction(axis_values):
+    x = axis_values.get(DPAD_AXES[0], 0.0)
+    y = axis_values.get(DPAD_AXES[1], 0.0)
+
+    if y <= -DPAD_THRESHOLD:
+        return 1
+    if y >= DPAD_THRESHOLD:
+        return -1
+    if x <= -DPAD_THRESHOLD:
+        return 2
+    if x >= DPAD_THRESHOLD:
+        return -2
+
+    return 0
+
+
+def direction_name(direction):
+    names = {
+        1: "forward",
+        -1: "backward",
+        2: "left",
+        -2: "right",
+        0: "paused",
+    }
+    return names[direction]
+
+
+def read_latest_controller_direction(controller):
+    latest_direction = None
+
     while True:
-        key = keyboard.read_key()
-        if key is None:
-            return latest_key
-        if key in ("w", "a", "s", "d", "q"):
-            latest_key = key
+        event = controller.read_event()
+        if event is None:
+            return latest_direction
+
+        _, raw_value, event_type, number = event
+        event_type_without_init = event_type & ~JS_EVENT_INIT
+
+        if event_type_without_init == JS_EVENT_AXIS and number in DPAD_AXES:
+            controller.axis_values[number] = normalize_axis(raw_value)
+            latest_direction = dpad_direction(controller.axis_values)
 
 
 def hip_motion_scale(leg_name, direction):
@@ -592,56 +631,60 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
     )
 
 
-def keyboard_walk_control(home_pose):
+def controller_walk_control(home_pose, device_path):
     next_swing = TRIPOD_A
     direction = 0
-    last_key_time = 0.0
+    last_reported_direction = None
+    is_centered = True
 
     print(
-        "Keyboard walk ready: hold W/S to walk forward/backward, "
-        "A/D to step left/right."
+        "Controller walk ready: hold D-pad up/down to walk forward/backward, "
+        "left/right to strafe."
     )
-    print("Release the key to pause. Press Q to stop and hold standing pose.")
+    print("Release the D-pad to pause. Press Ctrl+C to stop.")
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
     set_all_hip_offsets(0.0, delay=0.0)
 
-    with KeyboardInput() as keyboard:
+    with ControllerInput(device_path) as controller:
         while True:
-            key = read_latest_walk_key(keyboard)
-            now = time.monotonic()
+            latest_direction = read_latest_controller_direction(controller)
 
-            if key == "q":
-                print("Keyboard walk stopped.")
-                break
-            if key == "w":
-                direction = 1
-                last_key_time = now
-            elif key == "s":
-                direction = -1
-                last_key_time = now
-            elif key == "a":
-                direction = 2
-                last_key_time = now
-            elif key == "d":
-                direction = -2
-                last_key_time = now
+            if latest_direction is not None:
+                direction = latest_direction
 
-            if direction and now - last_key_time > KEY_RELEASE_TIMEOUT:
-                direction = 0
-                set_all_legs_offsets(home_pose[0], home_pose[1])
-                set_all_hip_offsets(0.0, delay=0.0)
+                if direction != last_reported_direction:
+                    print(f"D-pad direction: {direction_name(direction)}")
+                    last_reported_direction = direction
 
             if not direction:
+                if not is_centered:
+                    set_all_legs_offsets(home_pose[0], home_pose[1])
+                    set_all_hip_offsets(0.0, delay=0.0)
+                    is_centered = True
                 time.sleep(0.02)
                 continue
 
+            is_centered = False
             stance_tripod = TRIPOD_B if next_swing == TRIPOD_A else TRIPOD_A
             walk_half_cycle(home_pose, next_swing, stance_tripod, direction=direction)
             next_swing = stance_tripod
 
     set_all_legs_offsets(home_pose[0], home_pose[1])
     set_all_hip_offsets(0.0, delay=0.0)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Stand up the hexapod, then walk using an MSI GC30 D-pad."
+    )
+    parser.add_argument(
+        "device",
+        nargs="?",
+        default=os.environ.get("CONTROLLER_DEVICE", DEFAULT_CONTROLLER_DEVICE),
+        help=f"Linux joystick device path. Default: {DEFAULT_CONTROLLER_DEVICE}",
+    )
+    return parser.parse_args()
 
 
 def release_all():
@@ -654,6 +697,7 @@ def release_all():
 
 
 try:
+    args = parse_args()
     validate_ik_constants()
 
     print("Starting IK stand-up sequence.")
@@ -680,10 +724,10 @@ try:
     print("Step 4: Drop into the 70a7ad9 final pose")
     interpolate_pose(standing_pose, DROP_TO_POSE, steps=DROP_STEPS)
 
-    if KEYBOARD_WALK_AFTER_STAND:
-        print("Step 5: Keyboard walking control")
+    if CONTROLLER_WALK_AFTER_STAND:
+        print("Step 5: Controller walking control")
         try:
-            keyboard_walk_control(DROP_TO_POSE)
+            controller_walk_control(DROP_TO_POSE, args.device)
         except RuntimeError as error:
             print(f"{error} Holding standing pose instead.")
     elif WALK_AFTER_STAND:
