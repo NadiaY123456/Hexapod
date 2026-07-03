@@ -144,6 +144,7 @@ WALK_LIFT_SCALE = {
     "leg6": 1.0,
 }
 WALK_HIP_SWING_DEG = 15.0
+LATERAL_HIP_SWING_DEG = 24.0
 # Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
 # legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
 HIP_SWING_SCALE = {
@@ -531,8 +532,9 @@ def hip_motion_scale(leg_name, direction):
 def set_walk_frame(home_pose, swing_tripod, stance_tripod, t, direction=1):
     eased_t = t * t * (3 - 2 * t)
     lift = math.sin(math.pi * t)
-    swing_hip = -WALK_HIP_SWING_DEG + (2 * WALK_HIP_SWING_DEG * eased_t)
-    stance_hip = WALK_HIP_SWING_DEG - (2 * WALK_HIP_SWING_DEG * eased_t)
+    hip_swing = LATERAL_HIP_SWING_DEG if direction in (-2, 2) else WALK_HIP_SWING_DEG
+    swing_hip = -hip_swing + (2 * hip_swing * eased_t)
+    stance_hip = hip_swing - (2 * hip_swing * eased_t)
 
     for leg_name in swing_tripod:
         hip_scale = hip_motion_scale(leg_name, direction)
@@ -597,6 +599,7 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
     print(
         "Walk tuning -> "
         f"hip_swing={WALK_HIP_SWING_DEG}, "
+        f"lateral_hip_swing={LATERAL_HIP_SWING_DEG}, "
         f"hip_scale={HIP_SWING_SCALE}, "
         f"backward_scale={BACKWARD_HIP_SWING_SCALE}, "
         f"lateral_scale={LATERAL_HIP_SWING_SCALE}, "
