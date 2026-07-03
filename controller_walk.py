@@ -528,9 +528,9 @@ def right_stick_rotation(axis_values):
 
     angle = stick_angle_degrees(x, y)
     if x >= 0:
-        return -3, angle
+        return 3, angle
 
-    return 3, angle
+    return -3, angle
 
 
 def direction_name(direction, angle=None):
