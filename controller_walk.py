@@ -122,6 +122,7 @@ DROP_TO_POSE = [
     DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
     DROP_TO_KNEE_ANGLE - NEUTRALS["leg1"]["knee"],
 ]
+SIT_POSE = [CONTACT_FOOT_OFFSET, CONTACT_KNEE_OFFSET]
 DROP_STEPS = 20
 
 # Fast tripod gait groups:
@@ -204,7 +205,9 @@ LEFT_STICK_AXES = (0, 1)
 LEFT_STICK_DEADZONE = 0.25
 RIGHT_STICK_AXES = (2, 3)
 RIGHT_STICK_DEADZONE = 0.35
+A_BUTTON_NUMBERS = (0,)
 X_BUTTON_NUMBERS = (2,)
+Y_BUTTON_NUMBERS = (3,)
 DEFAULT_CONTROLLER_DEVICE = "/dev/input/js0"
 
 # Model angles for the 90-degree starting pose.
@@ -592,11 +595,12 @@ def movement_controls_centered(axis_values):
 def read_latest_controller_direction(controller):
     latest_command = None
     stop_requested = False
+    posture_action = None
 
     while True:
         event = controller.read_event()
         if event is None:
-            return latest_command, stop_requested
+            return latest_command, stop_requested, posture_action
 
         _, raw_value, event_type, number = event
         event_type_without_init = event_type & ~JS_EVENT_INIT
@@ -612,6 +616,18 @@ def read_latest_controller_direction(controller):
             and raw_value
         ):
             stop_requested = True
+        elif (
+            event_type_without_init == JS_EVENT_BUTTON
+            and number in A_BUTTON_NUMBERS
+            and raw_value
+        ):
+            posture_action = "sit"
+        elif (
+            event_type_without_init == JS_EVENT_BUTTON
+            and number in Y_BUTTON_NUMBERS
+            and raw_value
+        ):
+            posture_action = "stand"
 
 
 def hip_motion_scale(leg_name, direction, steering=0.0):
@@ -710,19 +726,35 @@ def hold_standing_pose(home_pose):
     set_all_hip_offsets(0.0, delay=0.0)
 
 
-def poll_controller_motion(controller, direction, steering):
-    latest_command, stop_requested = read_latest_controller_direction(controller)
+def command_sit_pose(home_pose):
+    print("A button: sitting.")
+    set_all_hip_offsets(0.0, delay=0.0)
+    interpolate_pose(home_pose, SIT_POSE, steps=DROP_STEPS)
+    hold_standing_pose(SIT_POSE)
 
-    if stop_requested:
-        return 0, 0.0, True
+
+def command_stand_pose(home_pose):
+    print("Y button: standing.")
+    set_all_hip_offsets(0.0, delay=0.0)
+    interpolate_pose(SIT_POSE, home_pose, steps=DROP_STEPS)
+    hold_standing_pose(home_pose)
+
+
+def poll_controller_motion(controller, direction, steering):
+    latest_command, stop_requested, posture_action = read_latest_controller_direction(
+        controller
+    )
+
+    if stop_requested or posture_action is not None:
+        return 0, 0.0, stop_requested, posture_action
 
     if latest_command is not None:
         direction, _, steering = latest_command
 
     if movement_controls_centered(controller.axis_values):
-        return 0, 0.0, False
+        return 0, 0.0, False, None
 
-    return direction, steering, False
+    return direction, steering, False, None
 
 
 def controller_walk_half_cycle(
@@ -734,15 +766,15 @@ def controller_walk_half_cycle(
     steering=0.0,
 ):
     for step in range(WALK_HALF_CYCLE_STEPS + 1):
-        direction, steering, stop_requested = poll_controller_motion(
+        direction, steering, stop_requested, posture_action = poll_controller_motion(
             controller,
             direction,
             steering,
         )
 
-        if stop_requested or not direction:
+        if stop_requested or posture_action is not None or not direction:
             hold_standing_pose(home_pose)
-            return direction, steering, stop_requested, False
+            return direction, steering, stop_requested, posture_action, False
 
         set_walk_frame(
             home_pose,
@@ -754,7 +786,7 @@ def controller_walk_half_cycle(
         )
         time.sleep(WALK_FRAME_DELAY)
 
-    return direction, steering, False, True
+    return direction, steering, False, None, True
 
 
 def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
@@ -811,6 +843,7 @@ def controller_walk_control(home_pose, device_path):
     next_swing = TRIPOD_A
     direction = 0
     steering = 0.0
+    posture = "stand"
     last_reported_direction = None
     last_reported_steering = None
     is_centered = True
@@ -822,6 +855,7 @@ def controller_walk_control(home_pose, device_path):
     )
     print("Push the left stick to walk forward while steering.")
     print("Push the right stick left/right to rotate in place.")
+    print("Press A to sit. Press Y to stand.")
     print("Press X to safety-stop and keep standing.")
     print("Release movement controls to pause. Press Ctrl+C to stop.")
 
@@ -830,7 +864,9 @@ def controller_walk_control(home_pose, device_path):
 
     with ControllerInput(device_path) as controller:
         while True:
-            latest_command, stop_requested = read_latest_controller_direction(controller)
+            latest_command, stop_requested, posture_action = (
+                read_latest_controller_direction(controller)
+            )
 
             if stop_requested:
                 direction = 0
@@ -839,6 +875,26 @@ def controller_walk_control(home_pose, device_path):
                 print("X safety stop: holding standing pose.")
                 last_reported_direction = direction
                 last_reported_steering = steering
+
+            if posture_action == "sit":
+                direction = 0
+                steering = 0.0
+                command_sit_pose(home_pose)
+                posture = "sit"
+                is_centered = True
+                last_reported_direction = 0
+                last_reported_steering = 0.0
+                continue
+
+            if posture_action == "stand":
+                direction = 0
+                steering = 0.0
+                command_stand_pose(home_pose)
+                posture = "stand"
+                is_centered = True
+                last_reported_direction = 0
+                last_reported_steering = 0.0
+                continue
 
             if movement_locked:
                 if not is_centered:
@@ -849,6 +905,11 @@ def controller_walk_control(home_pose, device_path):
                     movement_locked = False
                     print("Movement controls centered. Controller walk ready.")
 
+                time.sleep(0.02)
+                continue
+
+            if posture == "sit":
+                hold_standing_pose(SIT_POSE)
                 time.sleep(0.02)
                 continue
 
@@ -891,7 +952,13 @@ def controller_walk_control(home_pose, device_path):
 
             is_centered = False
             stance_tripod = TRIPOD_B if next_swing == TRIPOD_A else TRIPOD_A
-            direction, steering, stop_requested, cycle_complete = controller_walk_half_cycle(
+            (
+                direction,
+                steering,
+                stop_requested,
+                posture_action,
+                cycle_complete,
+            ) = controller_walk_half_cycle(
                 home_pose,
                 next_swing,
                 stance_tripod,
@@ -907,6 +974,26 @@ def controller_walk_control(home_pose, device_path):
                 print("X safety stop: holding standing pose.")
                 last_reported_direction = direction
                 last_reported_steering = steering
+
+            if posture_action == "sit":
+                direction = 0
+                steering = 0.0
+                command_sit_pose(home_pose)
+                posture = "sit"
+                is_centered = True
+                last_reported_direction = 0
+                last_reported_steering = 0.0
+                continue
+
+            if posture_action == "stand":
+                direction = 0
+                steering = 0.0
+                command_stand_pose(home_pose)
+                posture = "stand"
+                is_centered = True
+                last_reported_direction = 0
+                last_reported_steering = 0.0
+                continue
 
             if not direction:
                 hold_standing_pose(home_pose)
