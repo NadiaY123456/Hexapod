@@ -16,7 +16,7 @@ DPAD_THRESHOLD = 0.50
 
 # Common Linux joystick axis mappings for Xbox-style controllers.
 LEFT_STICK_AXES = (0, 1)
-RIGHT_STICK_AXES = (3, 4)
+RIGHT_STICK_AXES = (2, 3)
 DPAD_AXES = (6, 7)
 
 
