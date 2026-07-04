@@ -146,7 +146,7 @@ WALK_LIFT_SCALE = {
 }
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
-ROTATE_HIP_SWING_DEG = 24.0
+ROTATE_HIP_SWING_DEG = 30.0
 STEER_WHILE_WALKING_AMOUNT = 0.85
 # Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
 # legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
@@ -206,10 +206,10 @@ LEFT_STICK_DEADZONE = 0.25
 RIGHT_STICK_AXES = (2, 3)
 RIGHT_STICK_DEADZONE = 0.35
 RIGHT_STICK_ATTITUDE_DEADZONE = 0.18
-BODY_ROLL_FOOT_DEG = 8.0
-BODY_ROLL_KNEE_DEG = -6.0
-BODY_PITCH_FOOT_DEG = 8.0
-BODY_PITCH_KNEE_DEG = -6.0
+BODY_ROLL_FOOT_DEG = 12.0
+BODY_ROLL_KNEE_DEG = -9.0
+BODY_PITCH_FOOT_DEG = 16.0
+BODY_PITCH_KNEE_DEG = -12.0
 # MSI GC30 Linux joystick button numbers. Physical X reports as 3 and physical
 # Y reports as 4 on this controller.
 A_BUTTON_NUMBERS = (0,)
