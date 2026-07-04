@@ -215,7 +215,7 @@ BODY_PITCH_KNEE_DEG = -16.0
 # Y reports as 4 on this controller.
 A_BUTTON_NUMBERS = (0,)
 B_BUTTON_NUMBERS = (1,)
-CCW_TURN_BUTTON_NUMBERS = (3,)  # X
+X_BUTTON_NUMBERS = (3,)
 Y_BUTTON_NUMBERS = (4,)
 DEFAULT_CONTROLLER_DEVICE = "/dev/input/js0"
 
@@ -486,7 +486,7 @@ class ControllerInput:
         self.button_values = {
             A_BUTTON_NUMBERS[0]: False,
             B_BUTTON_NUMBERS[0]: False,
-            CCW_TURN_BUTTON_NUMBERS[0]: False,
+            X_BUTTON_NUMBERS[0]: False,
             Y_BUTTON_NUMBERS[0]: False,
         }
 
@@ -557,15 +557,15 @@ def left_stick_steered_walk(axis_values):
 def right_stick_attitude(axis_values):
     x = axis_values.get(RIGHT_STICK_AXES[0], 0.0)
     y = axis_values.get(RIGHT_STICK_AXES[1], 0.0)
-    roll = 0.0 if abs(x) < RIGHT_STICK_ATTITUDE_DEADZONE else x
+    roll = 0.0 if abs(x) < RIGHT_STICK_ATTITUDE_DEADZONE else -x
     pitch = 0.0 if abs(y) < RIGHT_STICK_ATTITUDE_DEADZONE else y
     return roll, pitch
 
 
 def button_turn_direction(button_values):
-    if any(button_values.get(number, False) for number in CCW_TURN_BUTTON_NUMBERS):
-        return 3
     if any(button_values.get(number, False) for number in B_BUTTON_NUMBERS):
+        return 3
+    if any(button_values.get(number, False) for number in X_BUTTON_NUMBERS):
         return -3
     return 0
 
@@ -644,14 +644,14 @@ def read_latest_controller_direction(controller, attitude):
         elif event_type_without_init == JS_EVENT_BUTTON and number in (
             A_BUTTON_NUMBERS
             + B_BUTTON_NUMBERS
-            + CCW_TURN_BUTTON_NUMBERS
+            + X_BUTTON_NUMBERS
             + Y_BUTTON_NUMBERS
         ):
             controller.button_values[number] = bool(raw_value)
             latest_command = controller_direction(controller)
             if not raw_value:
                 continue
-            if number in CCW_TURN_BUTTON_NUMBERS or number in B_BUTTON_NUMBERS:
+            if number in X_BUTTON_NUMBERS or number in B_BUTTON_NUMBERS:
                 continue
             if number in A_BUTTON_NUMBERS:
                 posture_action = "sit"
@@ -950,7 +950,7 @@ def controller_walk_control(home_pose, device_path):
     print("Push the left stick up/down to walk forward/backward while steering.")
     print("Push the right stick for small roll/pitch body attitude trims.")
     print("Press A to sit/down. Press Y to stand/up.")
-    print("Press X for CCW turn in place. Press B for CW turn in place.")
+    print("Press B for CCW turn in place. Press X for CW turn in place.")
     print("Release movement controls to pause. Press Ctrl+C to stop.")
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
