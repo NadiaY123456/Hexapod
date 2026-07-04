@@ -690,9 +690,9 @@ def body_attitude_offsets(leg_name, attitude):
         "leg1": 1.0,
         "leg2": 0.0,
         "leg3": -1.0,
-        "leg4": 1.0,
+        "leg4": -1.0,
         "leg5": 0.0,
-        "leg6": -1.0,
+        "leg6": 1.0,
     }
     pitch_sign = pitch_signs[leg_name]
 
