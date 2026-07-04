@@ -146,7 +146,8 @@ WALK_LIFT_SCALE = {
 }
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
-ROTATE_HIP_SWING_DEG = 36.0
+BODY_YAW_HIP_SWING_DEG = 36.0
+TURN_IN_PLACE_HIP_SWING_DEG = 24.0
 STEER_WHILE_WALKING_AMOUNT = 0.85
 # Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
 # legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
@@ -724,7 +725,7 @@ def set_walk_frame(
     if direction in (-2, 2):
         hip_swing = LATERAL_HIP_SWING_DEG
     elif direction in (-3, 3):
-        hip_swing = ROTATE_HIP_SWING_DEG
+        hip_swing = TURN_IN_PLACE_HIP_SWING_DEG
     else:
         hip_swing = WALK_HIP_SWING_DEG
     swing_hip = -hip_swing + (2 * hip_swing * eased_t)
@@ -892,7 +893,8 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         "Walk tuning -> "
         f"hip_swing={WALK_HIP_SWING_DEG}, "
         f"lateral_hip_swing={LATERAL_HIP_SWING_DEG}, "
-        f"rotate_hip_swing={ROTATE_HIP_SWING_DEG}, "
+        f"body_yaw_hip_swing={BODY_YAW_HIP_SWING_DEG}, "
+        f"turn_in_place_hip_swing={TURN_IN_PLACE_HIP_SWING_DEG}, "
         f"steer_while_walking={STEER_WHILE_WALKING_AMOUNT}, "
         f"hip_scale={HIP_SWING_SCALE}, "
         f"backward_scale={BACKWARD_HIP_SWING_SCALE}, "
