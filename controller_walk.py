@@ -199,6 +199,8 @@ STANCE_HIP_SCALE = {
 WALK_HALF_CYCLE_STEPS = 8
 WALK_FRAME_DELAY = 0.025
 WALK_SETTLE_DELAY = 0.04
+ANALOG_WALK_MIN_SPEED_SCALE = 0.35
+ANALOG_WALK_MAX_SPEED_SCALE = 1.0
 
 JS_EVENT_BUTTON = 0x01
 JS_EVENT_AXIS = 0x02
@@ -546,6 +548,14 @@ def stick_angle_degrees(x, y):
     return angle
 
 
+def apply_deadzone(value, deadzone):
+    magnitude = abs(value)
+    if magnitude < deadzone:
+        return 0.0
+    scaled = (magnitude - deadzone) / (1.0 - deadzone)
+    return math.copysign(max(0.0, min(1.0, scaled)), value)
+
+
 def left_stick_steered_walk(axis_values):
     x = axis_values.get(LEFT_STICK_AXES[0], 0.0)
     y = axis_values.get(LEFT_STICK_AXES[1], 0.0)
@@ -565,9 +575,25 @@ def left_stick_steered_walk(axis_values):
 def right_stick_attitude(axis_values):
     x = axis_values.get(RIGHT_STICK_AXES[0], 0.0)
     y = axis_values.get(RIGHT_STICK_AXES[1], 0.0)
-    roll = 0.0 if abs(x) < RIGHT_STICK_ATTITUDE_DEADZONE else -x
-    pitch = 0.0 if abs(y) < RIGHT_STICK_ATTITUDE_DEADZONE else y
+    roll = -apply_deadzone(x, RIGHT_STICK_ATTITUDE_DEADZONE)
+    pitch = apply_deadzone(y, RIGHT_STICK_ATTITUDE_DEADZONE)
     return roll, pitch
+
+
+def left_stick_speed_scale(axis_values):
+    y = axis_values.get(LEFT_STICK_AXES[1], 0.0)
+    travel = apply_deadzone(-y, LEFT_STICK_DEADZONE)
+    if travel == 0.0:
+        return 1.0
+    amount = abs(travel)
+    speed_range = ANALOG_WALK_MAX_SPEED_SCALE - ANALOG_WALK_MIN_SPEED_SCALE
+    return ANALOG_WALK_MIN_SPEED_SCALE + speed_range * amount
+
+
+def movement_speed_scale(controller, direction):
+    if abs(direction) == 4:
+        return left_stick_speed_scale(controller.axis_values)
+    return 1.0
 
 
 def button_turn_direction(button_values):
@@ -888,7 +914,8 @@ def controller_walk_half_cycle(
             steering=steering,
             attitude=attitude,
         )
-        time.sleep(WALK_FRAME_DELAY)
+        speed_scale = movement_speed_scale(controller, direction)
+        time.sleep(WALK_FRAME_DELAY / speed_scale)
 
     return direction, steering, False, None, True
 
@@ -912,6 +939,8 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         f"steer_while_walking={STEER_WHILE_WALKING_AMOUNT}, "
         f"backward_steering_trim={BACKWARD_STEERING_TRIM}, "
         f"lateral_fore_aft_trim={LATERAL_FORE_AFT_TRIM}, "
+        f"analog_walk_speed={ANALOG_WALK_MIN_SPEED_SCALE}"
+        f"-{ANALOG_WALK_MAX_SPEED_SCALE}, "
         f"hip_scale={HIP_SWING_SCALE}, "
         f"backward_scale={BACKWARD_HIP_SWING_SCALE}, "
         f"lateral_scale={LATERAL_HIP_SWING_SCALE}, "
