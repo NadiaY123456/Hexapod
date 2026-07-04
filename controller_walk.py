@@ -149,6 +149,7 @@ LATERAL_HIP_SWING_DEG = 24.0
 BODY_YAW_HIP_SWING_DEG = 36.0
 TURN_IN_PLACE_HIP_SWING_DEG = 24.0
 STEER_WHILE_WALKING_AMOUNT = 0.85
+BACKWARD_STEERING_TRIM = 0.12
 # Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
 # legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
 HIP_SWING_SCALE = {
@@ -551,7 +552,10 @@ def left_stick_steered_walk(axis_values):
 
     angle = stick_angle_degrees(x, y)
     direction = 4 if travel > 0.0 else -4
-    return direction, angle, max(-1.0, min(1.0, x))
+    steering = max(-1.0, min(1.0, x))
+    if direction < 0:
+        steering = max(-1.0, min(1.0, steering + BACKWARD_STEERING_TRIM))
+    return direction, angle, steering
 
 
 def right_stick_attitude(axis_values):
@@ -896,6 +900,7 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         f"body_yaw_hip_swing={BODY_YAW_HIP_SWING_DEG}, "
         f"turn_in_place_hip_swing={TURN_IN_PLACE_HIP_SWING_DEG}, "
         f"steer_while_walking={STEER_WHILE_WALKING_AMOUNT}, "
+        f"backward_steering_trim={BACKWARD_STEERING_TRIM}, "
         f"hip_scale={HIP_SWING_SCALE}, "
         f"backward_scale={BACKWARD_HIP_SWING_SCALE}, "
         f"lateral_scale={LATERAL_HIP_SWING_SCALE}, "
