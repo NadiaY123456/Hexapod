@@ -142,7 +142,7 @@ WALK_LIFT_SCALE = {
     "leg3": 1.18,
     "leg4": 1.0,
     "leg5": 1.0,
-    "leg6": 1.0,
+    "leg6": 1.18,
 }
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
@@ -205,10 +205,16 @@ LEFT_STICK_AXES = (0, 1)
 LEFT_STICK_DEADZONE = 0.25
 RIGHT_STICK_AXES = (2, 3)
 RIGHT_STICK_DEADZONE = 0.35
-# MSI GC30 Linux joystick button numbers. Physical X reports as 3 on this
-# controller, so leave X unmapped and put stand on physical Y.
+RIGHT_STICK_ATTITUDE_DEADZONE = 0.18
+BODY_ROLL_FOOT_DEG = 2.5
+BODY_ROLL_KNEE_DEG = -2.0
+BODY_PITCH_FOOT_DEG = 2.5
+BODY_PITCH_KNEE_DEG = -2.0
+# MSI GC30 Linux joystick button numbers. Physical X reports as 3 and physical
+# Y reports as 4 on this controller.
 A_BUTTON_NUMBERS = (0,)
-X_BUTTON_NUMBERS = ()
+B_BUTTON_NUMBERS = (1,)
+CCW_TURN_BUTTON_NUMBERS = (3,)  # X
 Y_BUTTON_NUMBERS = (4,)
 DEFAULT_CONTROLLER_DEVICE = "/dev/input/js0"
 
@@ -476,6 +482,12 @@ class ControllerInput:
             RIGHT_STICK_AXES[0]: 0.0,
             RIGHT_STICK_AXES[1]: 0.0,
         }
+        self.button_values = {
+            A_BUTTON_NUMBERS[0]: False,
+            B_BUTTON_NUMBERS[0]: False,
+            CCW_TURN_BUTTON_NUMBERS[0]: False,
+            Y_BUTTON_NUMBERS[0]: False,
+        }
 
     def __enter__(self):
         while True:
@@ -528,31 +540,33 @@ def stick_angle_degrees(x, y):
     return angle
 
 
-def right_stick_rotation(axis_values):
-    x = axis_values.get(RIGHT_STICK_AXES[0], 0.0)
-    y = axis_values.get(RIGHT_STICK_AXES[1], 0.0)
-    magnitude = min(1.0, math.hypot(x, y))
-
-    if magnitude < RIGHT_STICK_DEADZONE:
-        return 0, None
-
-    angle = stick_angle_degrees(x, y)
-    if x >= 0:
-        return 3, angle
-
-    return -3, angle
-
-
 def left_stick_steered_walk(axis_values):
     x = axis_values.get(LEFT_STICK_AXES[0], 0.0)
     y = axis_values.get(LEFT_STICK_AXES[1], 0.0)
-    magnitude = min(1.0, math.hypot(x, y))
+    travel = max(-1.0, min(1.0, -y))
 
-    if magnitude < LEFT_STICK_DEADZONE:
+    if abs(travel) < LEFT_STICK_DEADZONE:
         return 0, None, 0.0
 
     angle = stick_angle_degrees(x, y)
-    return 4, angle, max(-1.0, min(1.0, x))
+    direction = 4 if travel > 0.0 else -4
+    return direction, angle, max(-1.0, min(1.0, x))
+
+
+def right_stick_attitude(axis_values):
+    x = axis_values.get(RIGHT_STICK_AXES[0], 0.0)
+    y = axis_values.get(RIGHT_STICK_AXES[1], 0.0)
+    roll = 0.0 if abs(x) < RIGHT_STICK_ATTITUDE_DEADZONE else x
+    pitch = 0.0 if abs(y) < RIGHT_STICK_ATTITUDE_DEADZONE else -y
+    return roll, pitch
+
+
+def button_turn_direction(button_values):
+    if any(button_values.get(number, False) for number in CCW_TURN_BUTTON_NUMBERS):
+        return 3
+    if any(button_values.get(number, False) for number in B_BUTTON_NUMBERS):
+        return -3
+    return 0
 
 
 def direction_name(direction, angle=None):
@@ -564,18 +578,19 @@ def direction_name(direction, angle=None):
         3: "rotate left",
         -3: "rotate right",
         4: "steered forward",
+        -4: "steered backward",
         0: "paused",
     }
-    if angle is None or direction not in (-3, 3, 4):
+    if angle is None or direction not in (-4, -3, 3, 4):
         return names[direction]
-    stick_name = "left stick" if direction == 4 else "right stick"
+    stick_name = "left stick" if abs(direction) == 4 else "button"
     return f"{names[direction]} ({stick_name} angle {angle:.1f})"
 
 
 def controller_direction(controller):
-    rotate_direction, rotate_angle = right_stick_rotation(controller.axis_values)
-    if rotate_direction:
-        return rotate_direction, rotate_angle, 0.0
+    turn_direction = button_turn_direction(controller.button_values)
+    if turn_direction:
+        return turn_direction, None, 0.0
 
     walk_direction, walk_angle, steering = left_stick_steered_walk(
         controller.axis_values
@@ -586,56 +601,70 @@ def controller_direction(controller):
     return dpad_direction(controller.axis_values), None, 0.0
 
 
-def movement_controls_centered(axis_values):
+def movement_controls_centered(axis_values, button_values=None):
+    if button_values is None:
+        button_values = {}
+
     return (
         dpad_direction(axis_values) == 0
         and left_stick_steered_walk(axis_values)[0] == 0
-        and right_stick_rotation(axis_values)[0] == 0
+        and button_turn_direction(button_values) == 0
     )
 
 
-def read_latest_controller_direction(controller):
+def read_latest_controller_direction(controller, attitude):
     latest_command = None
     stop_requested = False
     posture_action = None
+    attitude_changed = False
 
     while True:
         event = controller.read_event()
         if event is None:
-            return latest_command, stop_requested, posture_action
+            return latest_command, stop_requested, posture_action, attitude_changed
 
         _, raw_value, event_type, number = event
         event_type_without_init = event_type & ~JS_EVENT_INIT
 
         if event_type_without_init == JS_EVENT_AXIS and number in (
-            DPAD_AXES + LEFT_STICK_AXES + RIGHT_STICK_AXES
+            DPAD_AXES + LEFT_STICK_AXES
         ):
             controller.axis_values[number] = normalize_axis(raw_value)
             latest_command = controller_direction(controller)
         elif (
-            event_type_without_init == JS_EVENT_BUTTON
-            and number in X_BUTTON_NUMBERS
-            and raw_value
+            event_type_without_init == JS_EVENT_AXIS
+            and number in RIGHT_STICK_AXES
         ):
-            stop_requested = True
-        elif (
-            event_type_without_init == JS_EVENT_BUTTON
-            and number in A_BUTTON_NUMBERS
-            and raw_value
+            controller.axis_values[number] = normalize_axis(raw_value)
+            attitude["roll"], attitude["pitch"] = right_stick_attitude(
+                controller.axis_values
+            )
+            attitude_changed = True
+        elif event_type_without_init == JS_EVENT_BUTTON and number in (
+            A_BUTTON_NUMBERS
+            + B_BUTTON_NUMBERS
+            + CCW_TURN_BUTTON_NUMBERS
+            + Y_BUTTON_NUMBERS
         ):
-            posture_action = "sit"
-        elif (
-            event_type_without_init == JS_EVENT_BUTTON
-            and number in Y_BUTTON_NUMBERS
-            and raw_value
-        ):
-            posture_action = "stand"
+            controller.button_values[number] = bool(raw_value)
+            latest_command = controller_direction(controller)
+            if not raw_value:
+                continue
+            if number in CCW_TURN_BUTTON_NUMBERS or number in B_BUTTON_NUMBERS:
+                continue
+            if number in A_BUTTON_NUMBERS:
+                posture_action = "sit"
+            elif number in Y_BUTTON_NUMBERS:
+                posture_action = "stand"
 
 
 def hip_motion_scale(leg_name, direction, steering=0.0):
-    if direction == 4:
+    if direction in (-4, 4):
+        walk_direction = 1 if direction > 0 else -1
         turn_bias = steering * STEER_WHILE_WALKING_AMOUNT
-        return 1.0 + turn_bias * ROTATE_HIP_SWING_SCALE[leg_name]
+        return walk_direction * (
+            1.0 + turn_bias * ROTATE_HIP_SWING_SCALE[leg_name]
+        )
 
     if direction in (-1, 1):
         direction_scale = BACKWARD_HIP_SWING_SCALE[leg_name] if direction < 0 else 1.0
@@ -652,6 +681,32 @@ def hip_motion_scale(leg_name, direction, steering=0.0):
     return 0.0
 
 
+def body_attitude_offsets(leg_name, attitude):
+    roll = attitude.get("roll", 0.0)
+    pitch = attitude.get("pitch", 0.0)
+
+    side_sign = 1.0 if leg_name in ("leg1", "leg2", "leg3") else -1.0
+    pitch_signs = {
+        "leg1": 1.0,
+        "leg2": 0.0,
+        "leg3": -1.0,
+        "leg4": 1.0,
+        "leg5": 0.0,
+        "leg6": -1.0,
+    }
+    pitch_sign = pitch_signs[leg_name]
+
+    foot = (
+        roll * side_sign * BODY_ROLL_FOOT_DEG
+        + pitch * pitch_sign * BODY_PITCH_FOOT_DEG
+    )
+    knee = (
+        roll * side_sign * BODY_ROLL_KNEE_DEG
+        + pitch * pitch_sign * BODY_PITCH_KNEE_DEG
+    )
+    return foot, knee
+
+
 def set_walk_frame(
     home_pose,
     swing_tripod,
@@ -659,7 +714,11 @@ def set_walk_frame(
     t,
     direction=1,
     steering=0.0,
+    attitude=None,
 ):
+    if attitude is None:
+        attitude = {"roll": 0.0, "pitch": 0.0}
+
     eased_t = t * t * (3 - 2 * t)
     lift = math.sin(math.pi * t)
     if direction in (-2, 2):
@@ -674,8 +733,9 @@ def set_walk_frame(
     for leg_name in swing_tripod:
         hip_scale = hip_motion_scale(leg_name, direction, steering)
         leg_lift = lift * WALK_LIFT_SCALE[leg_name]
-        swing_foot = home_pose[0] + WALK_LIFT_FOOT_DELTA * leg_lift
-        swing_knee = home_pose[1] + WALK_LIFT_KNEE_DELTA * leg_lift
+        attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
+        swing_foot = home_pose[0] + attitude_foot + WALK_LIFT_FOOT_DELTA * leg_lift
+        swing_knee = home_pose[1] + attitude_knee + WALK_LIFT_KNEE_DELTA * leg_lift
         set_leg_offsets(leg_name, swing_foot, swing_knee)
         set_leg_hip_offset(
             leg_name,
@@ -684,7 +744,12 @@ def set_walk_frame(
 
     for leg_name in stance_tripod:
         hip_scale = hip_motion_scale(leg_name, direction, steering)
-        set_leg_offsets(leg_name, home_pose[0], home_pose[1])
+        attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
+        set_leg_offsets(
+            leg_name,
+            home_pose[0] + attitude_foot,
+            home_pose[1] + attitude_knee,
+        )
         set_leg_hip_offset(
             leg_name,
             stance_hip
@@ -710,7 +775,14 @@ def tripod_start_offsets(direction=1):
     }
 
 
-def walk_half_cycle(home_pose, swing_tripod, stance_tripod, direction=1, steering=0.0):
+def walk_half_cycle(
+    home_pose,
+    swing_tripod,
+    stance_tripod,
+    direction=1,
+    steering=0.0,
+    attitude=None,
+):
     for step in range(WALK_HALF_CYCLE_STEPS + 1):
         set_walk_frame(
             home_pose,
@@ -719,12 +791,22 @@ def walk_half_cycle(home_pose, swing_tripod, stance_tripod, direction=1, steerin
             step / WALK_HALF_CYCLE_STEPS,
             direction=direction,
             steering=steering,
+            attitude=attitude,
         )
         time.sleep(WALK_FRAME_DELAY)
 
 
-def hold_standing_pose(home_pose):
-    set_all_legs_offsets(home_pose[0], home_pose[1])
+def hold_standing_pose(home_pose, attitude=None):
+    if attitude is None:
+        attitude = {"roll": 0.0, "pitch": 0.0}
+
+    for leg_name in legs:
+        foot_offset, knee_offset = body_attitude_offsets(leg_name, attitude)
+        set_leg_offsets(
+            leg_name,
+            home_pose[0] + foot_offset,
+            home_pose[1] + knee_offset,
+        )
     set_all_hip_offsets(0.0, delay=0.0)
 
 
@@ -742,9 +824,9 @@ def command_stand_pose(home_pose):
     hold_standing_pose(home_pose)
 
 
-def poll_controller_motion(controller, direction, steering):
-    latest_command, stop_requested, posture_action = read_latest_controller_direction(
-        controller
+def poll_controller_motion(controller, direction, steering, attitude):
+    latest_command, stop_requested, posture_action, _ = (
+        read_latest_controller_direction(controller, attitude)
     )
 
     if stop_requested or posture_action is not None:
@@ -753,7 +835,7 @@ def poll_controller_motion(controller, direction, steering):
     if latest_command is not None:
         direction, _, steering = latest_command
 
-    if movement_controls_centered(controller.axis_values):
+    if movement_controls_centered(controller.axis_values, controller.button_values):
         return 0, 0.0, False, None
 
     return direction, steering, False, None
@@ -766,16 +848,21 @@ def controller_walk_half_cycle(
     controller,
     direction=1,
     steering=0.0,
+    attitude=None,
 ):
+    if attitude is None:
+        attitude = {"roll": 0.0, "pitch": 0.0}
+
     for step in range(WALK_HALF_CYCLE_STEPS + 1):
         direction, steering, stop_requested, posture_action = poll_controller_motion(
             controller,
             direction,
             steering,
+            attitude,
         )
 
         if stop_requested or posture_action is not None or not direction:
-            hold_standing_pose(home_pose)
+            hold_standing_pose(home_pose, attitude)
             return direction, steering, stop_requested, posture_action, False
 
         set_walk_frame(
@@ -785,6 +872,7 @@ def controller_walk_half_cycle(
             step / WALK_HALF_CYCLE_STEPS,
             direction=direction,
             steering=steering,
+            attitude=attitude,
         )
         time.sleep(WALK_FRAME_DELAY)
 
@@ -848,6 +936,8 @@ def controller_walk_control(home_pose, device_path):
     posture = "stand"
     last_reported_direction = None
     last_reported_steering = None
+    last_reported_attitude = None
+    attitude = {"roll": 0.0, "pitch": 0.0}
     is_centered = True
     movement_locked = False
 
@@ -855,9 +945,10 @@ def controller_walk_control(home_pose, device_path):
         "Controller walk ready: hold D-pad up/down to walk forward/backward, "
         "left/right to strafe."
     )
-    print("Push the left stick to walk forward while steering.")
-    print("Push the right stick left/right to rotate in place.")
-    print("Press A to sit. Press Y to stand.")
+    print("Push the left stick up/down to walk forward/backward while steering.")
+    print("Push the right stick for small roll/pitch body attitude trims.")
+    print("Press A to sit/down. Press Y to stand/up.")
+    print("Press X for CCW turn in place. Press B for CW turn in place.")
     print("Release movement controls to pause. Press Ctrl+C to stop.")
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
@@ -865,15 +956,29 @@ def controller_walk_control(home_pose, device_path):
 
     with ControllerInput(device_path) as controller:
         while True:
-            latest_command, stop_requested, posture_action = (
-                read_latest_controller_direction(controller)
+            latest_command, stop_requested, posture_action, attitude_changed = (
+                read_latest_controller_direction(controller, attitude)
             )
+
+            if attitude_changed:
+                attitude_snapshot = (
+                    round(attitude["roll"], 2),
+                    round(attitude["pitch"], 2),
+                )
+                if attitude_snapshot != last_reported_attitude:
+                    print(
+                        "Right stick attitude: "
+                        f"roll {attitude['roll']:.2f}, pitch {attitude['pitch']:.2f}"
+                    )
+                    last_reported_attitude = attitude_snapshot
+                if not direction:
+                    hold_standing_pose(home_pose, attitude)
 
             if stop_requested:
                 direction = 0
                 steering = 0.0
                 movement_locked = True
-                print("X safety stop: holding standing pose.")
+                print("Safety stop: holding standing pose.")
                 last_reported_direction = direction
                 last_reported_steering = steering
 
@@ -899,10 +1004,13 @@ def controller_walk_control(home_pose, device_path):
 
             if movement_locked:
                 if not is_centered:
-                    hold_standing_pose(home_pose)
+                    hold_standing_pose(home_pose, attitude)
                     is_centered = True
 
-                if movement_controls_centered(controller.axis_values):
+                if movement_controls_centered(
+                    controller.axis_values,
+                    controller.button_values,
+                ):
                     movement_locked = False
                     print("Movement controls centered. Controller walk ready.")
 
@@ -910,7 +1018,7 @@ def controller_walk_control(home_pose, device_path):
                 continue
 
             if posture == "sit":
-                hold_standing_pose(SIT_POSE)
+                hold_standing_pose(SIT_POSE, attitude)
                 time.sleep(0.02)
                 continue
 
@@ -922,9 +1030,9 @@ def controller_walk_control(home_pose, device_path):
                     or abs(steering - last_reported_steering) >= 0.20
                 )
                 if direction != last_reported_direction or (
-                    direction == 4 and steering_changed
+                    abs(direction) == 4 and steering_changed
                 ):
-                    if direction == 4:
+                    if abs(direction) == 4:
                         print(
                             "Controller direction: "
                             f"{direction_name(direction, angle)}, steering {steering:.2f}"
@@ -936,7 +1044,10 @@ def controller_walk_control(home_pose, device_path):
                     last_reported_direction = direction
                     last_reported_steering = steering
 
-            if movement_controls_centered(controller.axis_values):
+            if movement_controls_centered(
+                controller.axis_values,
+                controller.button_values,
+            ):
                 direction = 0
                 steering = 0.0
                 if last_reported_direction not in (None, 0):
@@ -946,7 +1057,7 @@ def controller_walk_control(home_pose, device_path):
 
             if not direction:
                 if not is_centered:
-                    hold_standing_pose(home_pose)
+                    hold_standing_pose(home_pose, attitude)
                     is_centered = True
                 time.sleep(0.02)
                 continue
@@ -966,13 +1077,14 @@ def controller_walk_control(home_pose, device_path):
                 controller,
                 direction=direction,
                 steering=steering,
+                attitude=attitude,
             )
 
             if stop_requested:
                 direction = 0
                 steering = 0.0
                 movement_locked = True
-                print("X safety stop: holding standing pose.")
+                print("Safety stop: holding standing pose.")
                 last_reported_direction = direction
                 last_reported_steering = steering
 
@@ -997,7 +1109,7 @@ def controller_walk_control(home_pose, device_path):
                 continue
 
             if not direction:
-                hold_standing_pose(home_pose)
+                hold_standing_pose(home_pose, attitude)
                 is_centered = True
                 if last_reported_direction not in (None, 0):
                     print("Controller direction: paused")
@@ -1008,7 +1120,7 @@ def controller_walk_control(home_pose, device_path):
             if cycle_complete:
                 next_swing = stance_tripod
 
-    hold_standing_pose(home_pose)
+    hold_standing_pose(home_pose, attitude)
 
 
 def parse_args():
