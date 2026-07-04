@@ -92,7 +92,7 @@ HIP_TRIMS = {
 }
 
 STEP_DELAY = 0.015
-CONTACT_SETTLE_DELAY = 1.0
+CONTACT_SETTLE_DELAY = 0.0
 STAND_STEPS = 35
 HIP_START_ANGLE = 90
 
@@ -122,7 +122,9 @@ DROP_TO_POSE = [
     DROP_TO_FOOT_ANGLE - NEUTRALS["leg1"]["foot"],
     DROP_TO_KNEE_ANGLE - NEUTRALS["leg1"]["knee"],
 ]
-SIT_POSE = [CONTACT_FOOT_OFFSET, CONTACT_KNEE_OFFSET]
+SIT_FOOT_OFFSET = CONTACT_FOOT_OFFSET + 6.0
+SIT_KNEE_OFFSET = CONTACT_KNEE_OFFSET - 18.0
+SIT_POSE = [SIT_FOOT_OFFSET, SIT_KNEE_OFFSET]
 DROP_STEPS = 20
 
 # Fast tripod gait groups:
@@ -146,6 +148,7 @@ WALK_LIFT_SCALE = {
 }
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
+RIGHT_CRAB_HIP_SWING_SCALE = 1.15
 BODY_YAW_HIP_SWING_DEG = 36.0
 TURN_IN_PLACE_HIP_SWING_DEG = 24.0
 STEER_WHILE_WALKING_AMOUNT = 0.85
@@ -731,6 +734,8 @@ def set_walk_frame(
     lift = math.sin(math.pi * t)
     if direction in (-2, 2):
         hip_swing = LATERAL_HIP_SWING_DEG
+        if direction < 0:
+            hip_swing *= RIGHT_CRAB_HIP_SWING_SCALE
     elif direction in (-3, 3):
         hip_swing = TURN_IN_PLACE_HIP_SWING_DEG
     else:
@@ -822,7 +827,8 @@ def command_sit_pose(home_pose):
     print("A button: sitting.")
     set_all_hip_offsets(0.0, delay=0.0)
     interpolate_pose(home_pose, SIT_POSE, steps=DROP_STEPS)
-    hold_standing_pose(SIT_POSE)
+    print("Rest pose reached. Releasing servos.")
+    release_all()
 
 
 def command_stand_pose(home_pose):
@@ -900,6 +906,7 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         "Walk tuning -> "
         f"hip_swing={WALK_HIP_SWING_DEG}, "
         f"lateral_hip_swing={LATERAL_HIP_SWING_DEG}, "
+        f"right_crab_hip_swing_scale={RIGHT_CRAB_HIP_SWING_SCALE}, "
         f"body_yaw_hip_swing={BODY_YAW_HIP_SWING_DEG}, "
         f"turn_in_place_hip_swing={TURN_IN_PLACE_HIP_SWING_DEG}, "
         f"steer_while_walking={STEER_WHILE_WALKING_AMOUNT}, "
@@ -972,18 +979,22 @@ def controller_walk_control(home_pose, device_path):
             )
 
             if attitude_changed:
-                attitude_snapshot = (
-                    round(attitude["roll"], 2),
-                    round(attitude["pitch"], 2),
-                )
-                if attitude_snapshot != last_reported_attitude:
-                    print(
-                        "Right stick attitude: "
-                        f"roll {attitude['roll']:.2f}, pitch {attitude['pitch']:.2f}"
+                if posture == "sit":
+                    attitude["roll"] = 0.0
+                    attitude["pitch"] = 0.0
+                else:
+                    attitude_snapshot = (
+                        round(attitude["roll"], 2),
+                        round(attitude["pitch"], 2),
                     )
-                    last_reported_attitude = attitude_snapshot
-                if not direction:
-                    hold_standing_pose(home_pose, attitude)
+                    if attitude_snapshot != last_reported_attitude:
+                        print(
+                            "Right stick attitude: "
+                            f"roll {attitude['roll']:.2f}, pitch {attitude['pitch']:.2f}"
+                        )
+                        last_reported_attitude = attitude_snapshot
+                    if not direction:
+                        hold_standing_pose(home_pose, attitude)
 
             if stop_requested:
                 direction = 0
@@ -996,6 +1007,8 @@ def controller_walk_control(home_pose, device_path):
             if posture_action == "sit":
                 direction = 0
                 steering = 0.0
+                attitude["roll"] = 0.0
+                attitude["pitch"] = 0.0
                 command_sit_pose(home_pose)
                 posture = "sit"
                 is_centered = True
@@ -1006,6 +1019,8 @@ def controller_walk_control(home_pose, device_path):
             if posture_action == "stand":
                 direction = 0
                 steering = 0.0
+                attitude["roll"] = 0.0
+                attitude["pitch"] = 0.0
                 command_stand_pose(home_pose)
                 posture = "stand"
                 is_centered = True
@@ -1029,7 +1044,6 @@ def controller_walk_control(home_pose, device_path):
                 continue
 
             if posture == "sit":
-                hold_standing_pose(SIT_POSE, attitude)
                 time.sleep(0.02)
                 continue
 
@@ -1102,6 +1116,8 @@ def controller_walk_control(home_pose, device_path):
             if posture_action == "sit":
                 direction = 0
                 steering = 0.0
+                attitude["roll"] = 0.0
+                attitude["pitch"] = 0.0
                 command_sit_pose(home_pose)
                 posture = "sit"
                 is_centered = True
@@ -1112,6 +1128,8 @@ def controller_walk_control(home_pose, device_path):
             if posture_action == "stand":
                 direction = 0
                 steering = 0.0
+                attitude["roll"] = 0.0
+                attitude["pitch"] = 0.0
                 command_stand_pose(home_pose)
                 posture = "stand"
                 is_centered = True
@@ -1165,10 +1183,10 @@ def run_stand_up_sequence():
     contact_pose = [CONTACT_FOOT_OFFSET, CONTACT_KNEE_OFFSET]
 
     print("Step 1: Set hip/body joints to start angle")
-    set_all_hips_to_start_angle(delay=1)
+    set_all_hips_to_start_angle(delay=0)
 
     print("Step 2: Set foot and knee to tucked contact pose")
-    set_all_legs_offsets(contact_pose[0], contact_pose[1], delay=2)
+    set_all_legs_offsets(contact_pose[0], contact_pose[1], delay=0)
     time.sleep(CONTACT_SETTLE_DELAY)
 
     print("Step 3: IK lift with feet held in place")
