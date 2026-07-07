@@ -6,6 +6,13 @@ import struct
 import time
 from adafruit_servokit import ServoKit
 
+try:
+    import board
+    import adafruit_mpu6050
+except ImportError:
+    board = None
+    adafruit_mpu6050 = None
+
 kits = {
     "0x40": ServoKit(channels=16, address=0x40),
     "0x41": ServoKit(channels=16, address=0x41),
@@ -618,10 +625,11 @@ class LevelingController:
         if not LEVELING_ENABLED:
             return
 
-        try:
-            import board
-            import adafruit_mpu6050
+        if board is None or adafruit_mpu6050 is None:
+            print("MPU6050 leveling disabled: adafruit_mpu6050 is not installed.")
+            return
 
+        try:
             self.mpu = adafruit_mpu6050.MPU6050(
                 board.I2C(),
                 address=MPU6050_ADDRESS,
