@@ -233,6 +233,7 @@ LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
 LEVEL_MAX_ATTITUDE = 0.70
 LEVEL_FILTER_ALPHA = 0.75
+LEVEL_MAX_READ_ERRORS = 8
 # MSI GC30 Linux joystick button numbers. Physical X reports as 3 and physical
 # Y reports as 4 on this controller.
 A_BUTTON_NUMBERS = (0,)
@@ -621,6 +622,7 @@ class LevelingController:
         self.mpu = None
         self.roll = 0.0
         self.pitch = 0.0
+        self.read_errors = 0
 
         if not LEVELING_ENABLED:
             return
@@ -646,9 +648,18 @@ class LevelingController:
         try:
             accel_x, accel_y, accel_z = self.mpu.acceleration
         except Exception as error:
-            print(f"MPU6050 read failed; disabling leveling: {error}")
-            self.enabled = False
+            self.read_errors += 1
+            if self.read_errors >= LEVEL_MAX_READ_ERRORS:
+                print(
+                    "MPU6050 read failed repeatedly; disabling leveling: "
+                    f"{error}"
+                )
+                self.enabled = False
+            elif self.read_errors == 1:
+                print(f"MPU6050 read failed; retrying leveling reads: {error}")
             return {"roll": 0.0, "pitch": 0.0}
+
+        self.read_errors = 0
 
         roll_degrees = math.degrees(
             math.atan2(accel_y, math.sqrt(accel_x * accel_x + accel_z * accel_z))
