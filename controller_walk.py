@@ -218,6 +218,14 @@ BODY_ROLL_FOOT_DEG = 16.0
 BODY_ROLL_KNEE_DEG = -12.0
 BODY_PITCH_FOOT_DEG = 22.0
 BODY_PITCH_KNEE_DEG = -16.0
+MPU6050_ADDRESS = 0x68
+LEVELING_ENABLED = True
+LEVEL_ROLL_GAIN = 0.04
+LEVEL_PITCH_GAIN = 0.04
+LEVEL_ROLL_SIGN = -1.0
+LEVEL_PITCH_SIGN = -1.0
+LEVEL_MAX_ATTITUDE = 0.70
+LEVEL_FILTER_ALPHA = 0.75
 # MSI GC30 Linux joystick button numbers. Physical X reports as 3 and physical
 # Y reports as 4 on this controller.
 A_BUTTON_NUMBERS = (0,)
@@ -596,6 +604,90 @@ def movement_speed_scale(controller, direction):
     return 1.0
 
 
+def clamp_unit(value):
+    return max(-1.0, min(1.0, value))
+
+
+class LevelingController:
+    def __init__(self):
+        self.enabled = False
+        self.mpu = None
+        self.roll = 0.0
+        self.pitch = 0.0
+
+        if not LEVELING_ENABLED:
+            return
+
+        try:
+            import board
+            import adafruit_mpu6050
+
+            self.mpu = adafruit_mpu6050.MPU6050(
+                board.I2C(),
+                address=MPU6050_ADDRESS,
+            )
+            self.enabled = True
+            print(f"MPU6050 leveling enabled at address 0x{MPU6050_ADDRESS:02x}.")
+        except Exception as error:
+            print(f"MPU6050 leveling disabled: {error}")
+
+    def attitude(self):
+        if not self.enabled:
+            return {"roll": 0.0, "pitch": 0.0}
+
+        try:
+            accel_x, accel_y, accel_z = self.mpu.acceleration
+        except Exception as error:
+            print(f"MPU6050 read failed; disabling leveling: {error}")
+            self.enabled = False
+            return {"roll": 0.0, "pitch": 0.0}
+
+        roll_degrees = math.degrees(
+            math.atan2(accel_y, math.sqrt(accel_x * accel_x + accel_z * accel_z))
+        )
+        pitch_degrees = math.degrees(
+            math.atan2(-accel_x, math.sqrt(accel_y * accel_y + accel_z * accel_z))
+        )
+
+        target_roll = max(
+            -LEVEL_MAX_ATTITUDE,
+            min(
+                LEVEL_MAX_ATTITUDE,
+                LEVEL_ROLL_SIGN * roll_degrees * LEVEL_ROLL_GAIN,
+            ),
+        )
+        target_pitch = max(
+            -LEVEL_MAX_ATTITUDE,
+            min(
+                LEVEL_MAX_ATTITUDE,
+                LEVEL_PITCH_SIGN * pitch_degrees * LEVEL_PITCH_GAIN,
+            ),
+        )
+
+        self.roll = LEVEL_FILTER_ALPHA * self.roll + (
+            1.0 - LEVEL_FILTER_ALPHA
+        ) * target_roll
+        self.pitch = LEVEL_FILTER_ALPHA * self.pitch + (
+            1.0 - LEVEL_FILTER_ALPHA
+        ) * target_pitch
+
+        return {"roll": self.roll, "pitch": self.pitch}
+
+
+def combined_attitude(manual_attitude, leveler=None):
+    level_attitude = (
+        leveler.attitude()
+        if leveler is not None
+        else {"roll": 0.0, "pitch": 0.0}
+    )
+    return {
+        "roll": clamp_unit(manual_attitude.get("roll", 0.0) + level_attitude["roll"]),
+        "pitch": clamp_unit(
+            manual_attitude.get("pitch", 0.0) + level_attitude["pitch"]
+        ),
+    }
+
+
 def button_turn_direction(button_values):
     if any(button_values.get(number, False) for number in B_BUTTON_NUMBERS):
         return 3
@@ -889,6 +981,7 @@ def controller_walk_half_cycle(
     direction=1,
     steering=0.0,
     attitude=None,
+    leveler=None,
 ):
     if attitude is None:
         attitude = {"roll": 0.0, "pitch": 0.0}
@@ -902,9 +995,10 @@ def controller_walk_half_cycle(
         )
 
         if stop_requested or posture_action is not None or not direction:
-            hold_standing_pose(home_pose, attitude)
+            hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
             return direction, steering, stop_requested, posture_action, False
 
+        active_attitude = combined_attitude(attitude, leveler)
         set_walk_frame(
             home_pose,
             swing_tripod,
@@ -912,7 +1006,7 @@ def controller_walk_half_cycle(
             step / WALK_HALF_CYCLE_STEPS,
             direction=direction,
             steering=steering,
-            attitude=attitude,
+            attitude=active_attitude,
         )
         speed_scale = movement_speed_scale(controller, direction)
         time.sleep(WALK_FRAME_DELAY / speed_scale)
@@ -1000,6 +1094,7 @@ def controller_walk_control(home_pose, device_path):
 
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
     set_all_hip_offsets(0.0, delay=0.0)
+    leveler = LevelingController()
 
     with ControllerInput(device_path) as controller:
         while True:
@@ -1023,7 +1118,10 @@ def controller_walk_control(home_pose, device_path):
                         )
                         last_reported_attitude = attitude_snapshot
                     if not direction:
-                        hold_standing_pose(home_pose, attitude)
+                        hold_standing_pose(
+                            home_pose,
+                            combined_attitude(attitude, leveler),
+                        )
 
             if stop_requested:
                 direction = 0
@@ -1059,7 +1157,10 @@ def controller_walk_control(home_pose, device_path):
 
             if movement_locked:
                 if not is_centered:
-                    hold_standing_pose(home_pose, attitude)
+                    hold_standing_pose(
+                        home_pose,
+                        combined_attitude(attitude, leveler),
+                    )
                     is_centered = True
 
                 if movement_controls_centered(
@@ -1110,9 +1211,8 @@ def controller_walk_control(home_pose, device_path):
                     last_reported_steering = 0.0
 
             if not direction:
-                if not is_centered:
-                    hold_standing_pose(home_pose, attitude)
-                    is_centered = True
+                hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
+                is_centered = True
                 time.sleep(0.02)
                 continue
 
@@ -1132,6 +1232,7 @@ def controller_walk_control(home_pose, device_path):
                 direction=direction,
                 steering=steering,
                 attitude=attitude,
+                leveler=leveler,
             )
 
             if stop_requested:
@@ -1167,7 +1268,7 @@ def controller_walk_control(home_pose, device_path):
                 continue
 
             if not direction:
-                hold_standing_pose(home_pose, attitude)
+                hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
                 is_centered = True
                 if last_reported_direction not in (None, 0):
                     print("Controller direction: paused")
@@ -1178,7 +1279,7 @@ def controller_walk_control(home_pose, device_path):
             if cycle_complete:
                 next_swing = stance_tripod
 
-    hold_standing_pose(home_pose, attitude)
+    hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
 
 
 def parse_args():
