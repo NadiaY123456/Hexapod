@@ -14,21 +14,21 @@ except ImportError:
     adafruit_mpu6050 = None
 
 
-def create_i2c_bus():
+def create_mpu_i2c_bus():
     if board is None:
         return None
     try:
         return board.I2C()
     except Exception as error:
-        print(f"Shared I2C bus initialization failed: {error}")
+        print(f"MPU6050 I2C bus initialization failed: {error}")
         return None
 
 
-I2C_BUS = create_i2c_bus()
+MPU_I2C_BUS = create_mpu_i2c_bus()
 
 kits = {
-    "0x40": ServoKit(channels=16, address=0x40, i2c=I2C_BUS),
-    "0x41": ServoKit(channels=16, address=0x41, i2c=I2C_BUS),
+    "0x40": ServoKit(channels=16, address=0x40),
+    "0x41": ServoKit(channels=16, address=0x41),
 }
 
 # Channel layout per leg:
@@ -643,13 +643,13 @@ class LevelingController:
         if adafruit_mpu6050 is None:
             print("MPU6050 leveling disabled: adafruit_mpu6050 is not installed.")
             return
-        if I2C_BUS is None:
-            print("MPU6050 leveling disabled: shared I2C bus is unavailable.")
+        if MPU_I2C_BUS is None:
+            print("MPU6050 leveling disabled: I2C bus is unavailable.")
             return
 
         try:
             self.mpu = adafruit_mpu6050.MPU6050(
-                I2C_BUS,
+                MPU_I2C_BUS,
                 address=MPU6050_ADDRESS,
             )
             self.enabled = True
