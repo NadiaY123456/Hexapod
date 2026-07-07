@@ -246,6 +246,7 @@ LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
 LEVEL_MAX_ATTITUDE = 0.70
 LEVEL_FILTER_ALPHA = 0.75
+LEVEL_SAMPLE_INTERVAL = 0.10
 LEVEL_MAX_READ_ERRORS = 8
 # MSI GC30 Linux joystick button numbers. Physical X reports as 3 and physical
 # Y reports as 4 on this controller.
@@ -636,6 +637,7 @@ class LevelingController:
         self.roll = 0.0
         self.pitch = 0.0
         self.read_errors = 0
+        self.last_sample_time = 0.0
 
         if not LEVELING_ENABLED:
             return
@@ -660,6 +662,11 @@ class LevelingController:
     def attitude(self):
         if not self.enabled:
             return {"roll": 0.0, "pitch": 0.0}
+
+        now = time.monotonic()
+        if now - self.last_sample_time < LEVEL_SAMPLE_INTERVAL:
+            return {"roll": self.roll, "pitch": self.pitch}
+        self.last_sample_time = now
 
         try:
             accel_x, accel_y, accel_z = self.mpu.acceleration
