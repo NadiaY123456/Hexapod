@@ -613,11 +613,12 @@ def right_stick_attitude(axis_values):
 
 
 def left_stick_speed_scale(axis_values):
+    x = axis_values.get(LEFT_STICK_AXES[0], 0.0)
     y = axis_values.get(LEFT_STICK_AXES[1], 0.0)
-    travel = apply_deadzone(-y, LEFT_STICK_DEADZONE)
-    if travel == 0.0:
+    magnitude = min(1.0, math.hypot(x, y))
+    amount = apply_deadzone(magnitude, LEFT_STICK_DEADZONE)
+    if amount == 0.0:
         return 1.0
-    amount = abs(travel)
     speed_range = ANALOG_WALK_MAX_SPEED_SCALE - ANALOG_WALK_MIN_SPEED_SCALE
     return ANALOG_WALK_MIN_SPEED_SCALE + speed_range * amount
 
