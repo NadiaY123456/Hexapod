@@ -156,15 +156,15 @@ WALK_CYCLES = 8
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
 
-WALK_LIFT_FOOT_DELTA = 34.0
-WALK_LIFT_KNEE_DELTA = -23.0
+WALK_LIFT_FOOT_DELTA = 44.0
+WALK_LIFT_KNEE_DELTA = -31.0
 WALK_LIFT_SCALE = {
     "leg1": 1.0,
     "leg2": 1.0,
-    "leg3": 1.18,
+    "leg3": 1.25,
     "leg4": 1.0,
     "leg5": 1.0,
-    "leg6": 1.18,
+    "leg6": 1.25,
 }
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
