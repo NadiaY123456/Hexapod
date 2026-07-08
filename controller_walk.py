@@ -248,7 +248,8 @@ LEVEL_MAX_ATTITUDE = 0.70
 LEVEL_FILTER_ALPHA = 0.75
 LEVEL_SAMPLE_INTERVAL = 0.10
 LEVEL_MOVING_PITCH_SCALE = 0.35
-LEVEL_MAX_READ_ERRORS = 8
+LEVEL_MAX_READ_ERRORS = 20
+LEVEL_STATUS_INTERVAL = 0.50
 # MSI GC30 Linux joystick button numbers. Physical X reports as 3 and physical
 # Y reports as 4 on this controller.
 A_BUTTON_NUMBERS = (0,)
@@ -639,6 +640,7 @@ class LevelingController:
         self.pitch = 0.0
         self.read_errors = 0
         self.last_sample_time = 0.0
+        self.last_status_time = 0.0
 
         if not LEVELING_ENABLED:
             return
@@ -681,7 +683,7 @@ class LevelingController:
                 self.enabled = False
             elif self.read_errors == 1:
                 print(f"MPU6050 read failed; retrying leveling reads: {error}")
-            return {"roll": 0.0, "pitch": 0.0}
+            return {"roll": self.roll, "pitch": self.pitch}
 
         self.read_errors = 0
 
@@ -691,6 +693,13 @@ class LevelingController:
         pitch_degrees = math.degrees(
             math.atan2(-accel_x, math.sqrt(accel_y * accel_y + accel_z * accel_z))
         )
+
+        if now - self.last_status_time >= LEVEL_STATUS_INTERVAL:
+            print(
+                "MPU6050 angle -> "
+                f"roll {roll_degrees:.1f} deg, pitch {pitch_degrees:.1f} deg"
+            )
+            self.last_status_time = now
 
         target_roll = max(
             -LEVEL_MAX_ATTITUDE,
