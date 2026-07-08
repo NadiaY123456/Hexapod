@@ -248,8 +248,8 @@ LEVEL_MAX_ATTITUDE = 0.70
 LEVEL_FILTER_ALPHA = 0.75
 LEVEL_SAMPLE_INTERVAL = 0.10
 LEVEL_MOVING_PITCH_SCALE = 0.35
+LEVEL_FORWARD_PITCH_SCALE = 0.65
 LEVEL_MAX_READ_ERRORS = 20
-LEVEL_STATUS_INTERVAL = 0.50
 # MSI GC30 Linux joystick button numbers. Physical X reports as 3 and physical
 # Y reports as 4 on this controller.
 A_BUTTON_NUMBERS = (0,)
@@ -638,9 +638,10 @@ class LevelingController:
         self.mpu = None
         self.roll = 0.0
         self.pitch = 0.0
+        self.roll_degrees = 0.0
+        self.pitch_degrees = 0.0
         self.read_errors = 0
         self.last_sample_time = 0.0
-        self.last_status_time = 0.0
 
         if not LEVELING_ENABLED:
             return
@@ -687,32 +688,25 @@ class LevelingController:
 
         self.read_errors = 0
 
-        roll_degrees = math.degrees(
+        self.roll_degrees = math.degrees(
             math.atan2(accel_y, math.sqrt(accel_x * accel_x + accel_z * accel_z))
         )
-        pitch_degrees = math.degrees(
+        self.pitch_degrees = math.degrees(
             math.atan2(-accel_x, math.sqrt(accel_y * accel_y + accel_z * accel_z))
         )
-
-        if now - self.last_status_time >= LEVEL_STATUS_INTERVAL:
-            print(
-                "MPU6050 angle -> "
-                f"roll {roll_degrees:.1f} deg, pitch {pitch_degrees:.1f} deg"
-            )
-            self.last_status_time = now
 
         target_roll = max(
             -LEVEL_MAX_ATTITUDE,
             min(
                 LEVEL_MAX_ATTITUDE,
-                LEVEL_ROLL_SIGN * roll_degrees * LEVEL_ROLL_GAIN,
+                LEVEL_ROLL_SIGN * self.roll_degrees * LEVEL_ROLL_GAIN,
             ),
         )
         target_pitch = max(
             -LEVEL_MAX_ATTITUDE,
             min(
                 LEVEL_MAX_ATTITUDE,
-                LEVEL_PITCH_SIGN * pitch_degrees * LEVEL_PITCH_GAIN,
+                LEVEL_PITCH_SIGN * self.pitch_degrees * LEVEL_PITCH_GAIN,
             ),
         )
 
@@ -724,6 +718,15 @@ class LevelingController:
         ) * target_pitch
 
         return {"roll": self.roll, "pitch": self.pitch}
+
+    def print_angles(self, label="MPU6050 angle"):
+        if not self.enabled:
+            return
+        self.attitude()
+        print(
+            f"{label} -> "
+            f"roll {self.roll_degrees:.1f} deg, pitch {self.pitch_degrees:.1f} deg"
+        )
 
 
 def combined_attitude(manual_attitude, leveler=None, pitch_scale=1.0):
@@ -739,6 +742,12 @@ def combined_attitude(manual_attitude, leveler=None, pitch_scale=1.0):
             + level_attitude["pitch"] * pitch_scale
         ),
     }
+
+
+def moving_pitch_scale(direction):
+    if direction in (1, 4):
+        return LEVEL_FORWARD_PITCH_SCALE
+    return LEVEL_MOVING_PITCH_SCALE
 
 
 def button_turn_direction(button_values):
@@ -1054,7 +1063,7 @@ def controller_walk_half_cycle(
         active_attitude = combined_attitude(
             attitude,
             leveler,
-            pitch_scale=LEVEL_MOVING_PITCH_SCALE,
+            pitch_scale=moving_pitch_scale(direction),
         )
         set_walk_frame(
             home_pose,
@@ -1334,6 +1343,7 @@ def controller_walk_control(home_pose, device_path):
                 continue
 
             if cycle_complete:
+                leveler.print_angles("MPU6050 ground-contact angle")
                 next_swing = stance_tripod
 
     hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
