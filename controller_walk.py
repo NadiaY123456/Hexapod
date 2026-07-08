@@ -246,7 +246,8 @@ LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
 LEVEL_MAX_ATTITUDE = 0.70
 LEVEL_FILTER_ALPHA = 0.75
-LEVEL_SAMPLE_INTERVAL = 0.05
+LEVEL_SAMPLE_INTERVAL = 0.10
+LEVEL_MOVING_PITCH_SCALE = 0.35
 LEVEL_MAX_READ_ERRORS = 8
 # MSI GC30 Linux joystick button numbers. Physical X reports as 3 and physical
 # Y reports as 4 on this controller.
@@ -716,7 +717,7 @@ class LevelingController:
         return {"roll": self.roll, "pitch": self.pitch}
 
 
-def combined_attitude(manual_attitude, leveler=None):
+def combined_attitude(manual_attitude, leveler=None, pitch_scale=1.0):
     level_attitude = (
         leveler.attitude()
         if leveler is not None
@@ -725,7 +726,8 @@ def combined_attitude(manual_attitude, leveler=None):
     return {
         "roll": clamp_unit(manual_attitude.get("roll", 0.0) + level_attitude["roll"]),
         "pitch": clamp_unit(
-            manual_attitude.get("pitch", 0.0) + level_attitude["pitch"]
+            manual_attitude.get("pitch", 0.0)
+            + level_attitude["pitch"] * pitch_scale
         ),
     }
 
@@ -1040,7 +1042,11 @@ def controller_walk_half_cycle(
             hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
             return direction, steering, stop_requested, posture_action, False
 
-        active_attitude = combined_attitude(attitude, leveler)
+        active_attitude = combined_attitude(
+            attitude,
+            leveler,
+            pitch_scale=LEVEL_MOVING_PITCH_SCALE,
+        )
         set_walk_frame(
             home_pose,
             swing_tripod,
