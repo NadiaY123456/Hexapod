@@ -246,13 +246,16 @@ LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
 LEVEL_MAX_ATTITUDE = 0.70
 LEVEL_FILTER_ALPHA = 0.75
-LEVEL_SAMPLE_INTERVAL = 0.02
+LEVEL_SAMPLE_INTERVAL = 0.05
 LEVEL_MOVING_PITCH_SCALE = 0.35
 LEVEL_FORWARD_PITCH_SCALE = 0.65
-LEVEL_MAX_READ_ERRORS = 20
+LEVEL_MAX_READ_ERRORS = 80
+MPU_READ_RETRIES = 4
+MPU_READ_RETRY_DELAY = 0.008
+MPU_READ_WARNING_INTERVAL = 2.0
 MADGWICK_BETA = 0.08
 GYRO_CALIBRATION_SAMPLES = 60
-GYRO_CALIBRATION_DELAY = 0.005
+GYRO_CALIBRATION_DELAY = 0.01
 
 # Tune these measured stride values on the floor. They are used for odometry
 # because accelerometer-only distance integration drifts badly on legged robots.
@@ -801,6 +804,7 @@ class LevelingController:
         self.gyro_bias = (0.0, 0.0, 0.0)
         self.read_errors = 0
         self.last_sample_time = 0.0
+        self.last_read_warning_time = 0.0
 
         if not LEVELING_ENABLED:
             return
@@ -817,7 +821,10 @@ class LevelingController:
                 MPU_I2C_BUS,
                 address=MPU6050_ADDRESS,
             )
-            accel_x, accel_y, accel_z = self.mpu.acceleration
+            accel_x, accel_y, accel_z = self.read_sensor_value(
+                "acceleration",
+                retries=MPU_READ_RETRIES * 2,
+            )
             self.filter.set_from_accel(accel_x, accel_y, accel_z)
             self.gyro_bias = self.calibrate_gyro()
             self.last_sample_time = time.monotonic()
@@ -829,16 +836,43 @@ class LevelingController:
         except Exception as error:
             print(f"MPU6050 leveling disabled: {error}")
 
+    def read_sensor_value(self, sensor_name, retries=MPU_READ_RETRIES):
+        last_error = None
+
+        for attempt in range(retries):
+            try:
+                return getattr(self.mpu, sensor_name)
+            except OSError as error:
+                last_error = error
+            except Exception as error:
+                last_error = error
+                break
+
+            if attempt < retries - 1:
+                time.sleep(MPU_READ_RETRY_DELAY)
+
+        raise last_error
+
+    def read_motion_sample(self):
+        accel = self.read_sensor_value("acceleration")
+        gyro = self.read_sensor_value("gyro")
+        return accel, gyro
+
     def calibrate_gyro(self):
         gyro_x_total = 0.0
         gyro_y_total = 0.0
         gyro_z_total = 0.0
         samples = 0
+        warning_printed = False
 
         for _ in range(GYRO_CALIBRATION_SAMPLES):
             try:
-                gyro_x, gyro_y, gyro_z = self.mpu.gyro
-            except Exception:
+                gyro_x, gyro_y, gyro_z = self.read_sensor_value("gyro")
+            except Exception as error:
+                if not warning_printed:
+                    print(f"MPU6050 gyro calibration retrying after: {error}")
+                    warning_printed = True
+                time.sleep(GYRO_CALIBRATION_DELAY)
                 continue
             gyro_x_total += gyro_x
             gyro_y_total += gyro_y
@@ -847,7 +881,14 @@ class LevelingController:
             time.sleep(GYRO_CALIBRATION_DELAY)
 
         if samples == 0:
+            print("MPU6050 gyro calibration had no clean samples; using zero bias.")
             return 0.0, 0.0, 0.0
+
+        if samples < GYRO_CALIBRATION_SAMPLES:
+            print(
+                "MPU6050 gyro calibration used "
+                f"{samples}/{GYRO_CALIBRATION_SAMPLES} clean samples."
+            )
 
         return (
             gyro_x_total / samples,
@@ -865,9 +906,9 @@ class LevelingController:
         previous_sample_time = self.last_sample_time
 
         try:
-            accel_x, accel_y, accel_z = self.mpu.acceleration
-            gyro_x, gyro_y, gyro_z = self.mpu.gyro
+            accel, gyro = self.read_motion_sample()
         except Exception as error:
+            self.last_sample_time = now
             self.read_errors += 1
             if self.read_errors >= LEVEL_MAX_READ_ERRORS:
                 print(
@@ -875,10 +916,12 @@ class LevelingController:
                     f"{error}"
                 )
                 self.enabled = False
-            elif self.read_errors == 1:
-                print(f"MPU6050 read failed; retrying leveling reads: {error}")
+            else:
+                self.maybe_print_read_warning(error)
             return {"roll": self.roll, "pitch": self.pitch}
 
+        accel_x, accel_y, accel_z = accel
+        gyro_x, gyro_y, gyro_z = gyro
         self.read_errors = 0
         dt = max(0.001, min(0.25, now - previous_sample_time))
         self.last_sample_time = now
@@ -918,6 +961,16 @@ class LevelingController:
         ) * target_pitch
 
         return {"roll": self.roll, "pitch": self.pitch}
+
+    def maybe_print_read_warning(self, error):
+        now = time.monotonic()
+        if now - self.last_read_warning_time < MPU_READ_WARNING_INTERVAL:
+            return
+        self.last_read_warning_time = now
+        print(
+            "MPU6050 read skipped; keeping last orientation "
+            f"({self.read_errors}/{LEVEL_MAX_READ_ERRORS}): {error}"
+        )
 
     def print_angles(self, label="MPU6050 angle"):
         if not self.enabled:
