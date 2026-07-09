@@ -244,11 +244,11 @@ LEVEL_ROLL_GAIN = 0.04
 LEVEL_PITCH_GAIN = 0.04
 LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
-LEVEL_MAX_ATTITUDE = 0.70
-LEVEL_FILTER_ALPHA = 0.75
+LEVEL_MAX_ATTITUDE = 0.90
+LEVEL_FILTER_ALPHA = 0.55
 LEVEL_SAMPLE_INTERVAL = 0.05
 LEVEL_MOVING_ROLL_SCALE = 1.0
-LEVEL_MOVING_PITCH_SCALE = 0.75
+LEVEL_MOVING_PITCH_SCALE = 1.0
 LEVEL_FORWARD_PITCH_SCALE = 1.0
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
@@ -981,7 +981,9 @@ class LevelingController:
             f"{label} -> "
             f"roll {self.roll_degrees:.1f} deg, "
             f"pitch {self.pitch_degrees:.1f} deg, "
-            f"yaw {self.yaw_degrees:.1f} deg"
+            f"yaw {self.yaw_degrees:.1f} deg, "
+            f"correction roll {self.roll:.2f}, "
+            f"pitch {self.pitch:.2f}"
         )
 
 
@@ -1387,12 +1389,6 @@ def controller_walk_half_cycle(
     if attitude is None:
         attitude = {"roll": 0.0, "pitch": 0.0}
 
-    walk_level_attitude = (
-        leveler.attitude(force=True)
-        if leveler is not None
-        else {"roll": 0.0, "pitch": 0.0}
-    )
-
     for step in range(WALK_HALF_CYCLE_STEPS + 1):
         direction, steering, stop_requested, posture_action = poll_controller_motion(
             controller,
@@ -1411,7 +1407,6 @@ def controller_walk_half_cycle(
             leveler,
             roll_scale=walk_roll_scale,
             pitch_scale=walk_pitch_scale,
-            level_attitude=walk_level_attitude,
         )
         set_walk_frame(
             home_pose,
