@@ -1,0 +1,293 @@
+import argparse
+import json
+import sys
+import time
+from dataclasses import dataclass
+from functools import lru_cache
+
+
+DEFAULT_MODEL = (
+    "/usr/share/imx500-models/"
+    "imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"
+)
+
+
+@dataclass
+class Detection:
+    label: str
+    category: int
+    confidence: float
+    box: tuple
+    center: tuple
+
+
+class DetectionPrinter:
+    def __init__(self, min_interval, target_labels):
+        self.min_interval = min_interval
+        self.target_labels = {label.lower() for label in target_labels}
+        self.last_print_time = 0.0
+
+    def should_print(self):
+        now = time.monotonic()
+        if now - self.last_print_time < self.min_interval:
+            return False
+        self.last_print_time = now
+        return True
+
+    def print(self, detections, frame_size):
+        if not self.should_print():
+            return
+
+        selected = [
+            detection
+            for detection in detections
+            if not self.target_labels
+            or detection.label.lower() in self.target_labels
+        ]
+        if not selected:
+            print("detections: none")
+            return
+
+        frame_w, frame_h = frame_size
+        payload = []
+        for detection in selected:
+            center_x, center_y = detection.center
+            payload.append(
+                {
+                    "label": detection.label,
+                    "confidence": round(detection.confidence, 3),
+                    "box": [int(value) for value in detection.box],
+                    "center": [int(center_x), int(center_y)],
+                    "offset": [
+                        round((center_x - frame_w / 2) / (frame_w / 2), 3),
+                        round((center_y - frame_h / 2) / (frame_h / 2), 3),
+                    ],
+                }
+            )
+        print(json.dumps({"detections": payload}, separators=(",", ":")))
+
+
+def import_camera_stack():
+    try:
+        import cv2
+        from picamera2 import MappedArray, Picamera2
+        from picamera2.devices import IMX500
+        from picamera2.devices.imx500 import (
+            NetworkIntrinsics,
+            postprocess_nanodet_detection,
+        )
+    except ImportError as error:
+        print(
+            "Missing Raspberry Pi AI Camera dependencies. Install them on the Pi with:\n"
+            "  sudo apt update\n"
+            "  sudo apt install imx500-all python3-opencv python3-munkres\n\n"
+            f"Original import error: {error}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    return cv2, MappedArray, Picamera2, IMX500, NetworkIntrinsics, postprocess_nanodet_detection
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description="Run Raspberry Pi AI Camera object detection and print JSON detections."
+    )
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Path to an IMX500 .rpk model.")
+    parser.add_argument("--labels", help="Optional labels text file, one label per line.")
+    parser.add_argument("--threshold", type=float, default=0.55, help="Minimum confidence.")
+    parser.add_argument("--iou", type=float, default=0.65, help="NMS IoU threshold.")
+    parser.add_argument("--max-detections", type=int, default=10)
+    parser.add_argument("--fps", type=int, help="Override camera frame rate.")
+    parser.add_argument("--headless", action="store_true", help="Disable preview window.")
+    parser.add_argument("--no-draw", action="store_true", help="Do not draw preview boxes.")
+    parser.add_argument(
+        "--print-interval",
+        type=float,
+        default=0.25,
+        help="Seconds between terminal detection updates.",
+    )
+    parser.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        help="Only print matching labels. Can be repeated, for example --target person.",
+    )
+    parser.add_argument(
+        "--bbox-normalization",
+        action=argparse.BooleanOptionalAction,
+        help="Override model bounding box normalization.",
+    )
+    parser.add_argument(
+        "--bbox-order",
+        choices=("yx", "xy"),
+        help="Override bounding box order.",
+    )
+    parser.add_argument(
+        "--postprocess",
+        choices=("", "nanodet"),
+        default=None,
+        help="Override model post-processing type.",
+    )
+    parser.add_argument(
+        "--preserve-aspect-ratio",
+        action=argparse.BooleanOptionalAction,
+        help="Preserve input tensor aspect ratio.",
+    )
+    return parser.parse_args()
+
+
+def rectangle_to_box(rectangle):
+    if hasattr(rectangle, "x"):
+        return (
+            int(rectangle.x),
+            int(rectangle.y),
+            int(rectangle.width),
+            int(rectangle.height),
+        )
+    x, y, w, h = rectangle
+    return int(x), int(y), int(w), int(h)
+
+
+def load_labels(path):
+    if path is None:
+        return None
+    with open(path, "r", encoding="utf-8") as label_file:
+        return [line.strip() for line in label_file if line.strip()]
+
+
+def main():
+    args = get_args()
+    (
+        cv2,
+        MappedArray,
+        Picamera2,
+        IMX500,
+        NetworkIntrinsics,
+        postprocess_nanodet_detection,
+    ) = import_camera_stack()
+
+    imx500 = IMX500(args.model)
+    intrinsics = imx500.network_intrinsics or NetworkIntrinsics()
+    if intrinsics.task and intrinsics.task != "object detection":
+        print(f"Model task is {intrinsics.task!r}, not object detection.", file=sys.stderr)
+        return 2
+    intrinsics.task = "object detection"
+
+    labels = load_labels(args.labels)
+    if labels is not None:
+        intrinsics.labels = labels
+    for key, value in vars(args).items():
+        if value is not None and hasattr(intrinsics, key):
+            setattr(intrinsics, key, value)
+    intrinsics.update_with_defaults()
+
+    picam2 = Picamera2(imx500.camera_num)
+    frame_rate = args.fps or intrinsics.inference_rate
+    config = picam2.create_preview_configuration(
+        controls={"FrameRate": frame_rate},
+        buffer_count=12,
+    )
+    printer = DetectionPrinter(args.print_interval, args.target)
+    detections = []
+
+    @lru_cache
+    def get_labels():
+        model_labels = intrinsics.labels or []
+        if intrinsics.ignore_dash_labels:
+            model_labels = [label for label in model_labels if label and label != "-"]
+        return model_labels
+
+    def label_for(category):
+        labels = get_labels()
+        category = int(category)
+        if 0 <= category < len(labels):
+            return labels[category]
+        return f"class_{category}"
+
+    def parse_detections(metadata):
+        nonlocal detections
+
+        outputs = imx500.get_outputs(metadata, add_batch=True)
+        if outputs is None:
+            return detections
+
+        input_w, input_h = imx500.get_input_size()
+        if intrinsics.postprocess == "nanodet":
+            boxes, scores, classes = postprocess_nanodet_detection(
+                outputs=outputs[0],
+                conf=args.threshold,
+                iou_thres=args.iou,
+                max_out_dets=args.max_detections,
+            )[0]
+            from picamera2.devices.imx500.postprocess import scale_boxes
+
+            boxes = scale_boxes(boxes, 1, 1, input_h, input_w, False, False)
+        else:
+            boxes, scores, classes = outputs[0][0], outputs[1][0], outputs[2][0]
+            if intrinsics.bbox_normalization:
+                boxes = boxes / input_h
+            if intrinsics.bbox_order == "xy":
+                boxes = boxes[:, [1, 0, 3, 2]]
+
+        parsed = []
+        for coords, score, category in zip(boxes, scores, classes):
+            if score < args.threshold:
+                continue
+            rect = imx500.convert_inference_coords(coords, metadata, picam2)
+            x, y, w, h = rectangle_to_box(rect)
+            parsed.append(
+                Detection(
+                    label=label_for(category),
+                    category=int(category),
+                    confidence=float(score),
+                    box=(x, y, w, h),
+                    center=(x + w / 2, y + h / 2),
+                )
+            )
+
+        detections = parsed[: args.max_detections]
+        return detections
+
+    def draw_detections(request, stream="main"):
+        if args.no_draw:
+            return
+        with MappedArray(request, stream) as mapped:
+            for detection in detections:
+                x, y, w, h = detection.box
+                label = f"{detection.label} ({detection.confidence:.2f})"
+                cv2.rectangle(mapped.array, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(
+                    mapped.array,
+                    label,
+                    (x + 4, max(18, y + 18)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 0, 255),
+                    1,
+                )
+
+    imx500.show_network_fw_progress_bar()
+    picam2.start(config, show_preview=not args.headless)
+    if intrinsics.preserve_aspect_ratio:
+        imx500.set_auto_aspect_ratio()
+    if not args.headless and not args.no_draw:
+        picam2.pre_callback = draw_detections
+
+    print("AI Camera object detection running. Press Ctrl+C to stop.")
+    try:
+        while True:
+            metadata = picam2.capture_metadata()
+            current_detections = parse_detections(metadata)
+            size = picam2.camera_configuration()["main"]["size"]
+            printer.print(current_detections, size)
+    except KeyboardInterrupt:
+        print("\nStopping object detection.")
+    finally:
+        picam2.stop()
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
