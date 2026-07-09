@@ -246,10 +246,21 @@ LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
 LEVEL_MAX_ATTITUDE = 0.70
 LEVEL_FILTER_ALPHA = 0.75
-LEVEL_SAMPLE_INTERVAL = 0.10
+LEVEL_SAMPLE_INTERVAL = 0.02
 LEVEL_MOVING_PITCH_SCALE = 0.35
 LEVEL_FORWARD_PITCH_SCALE = 0.65
 LEVEL_MAX_READ_ERRORS = 20
+MADGWICK_BETA = 0.08
+GYRO_CALIBRATION_SAMPLES = 60
+GYRO_CALIBRATION_DELAY = 0.005
+
+# Tune these measured stride values on the floor. They are used for odometry
+# because accelerometer-only distance integration drifts badly on legged robots.
+WALK_FORWARD_MM_PER_HALF_CYCLE = 28.0
+WALK_LATERAL_MM_PER_HALF_CYCLE = 22.0
+WALK_STEER_YAW_DEG_PER_HALF_CYCLE = 7.5
+WALK_TURN_DEG_PER_HALF_CYCLE = 14.0
+ODOMETRY_REPORT_INTERVAL = 0.75
 # MSI GC30 Linux joystick button numbers. Physical X reports as 3 and physical
 # Y reports as 4 on this controller.
 A_BUTTON_NUMBERS = (0,)
@@ -633,14 +644,161 @@ def clamp_unit(value):
     return max(-1.0, min(1.0, value))
 
 
+def euler_to_quaternion(roll, pitch, yaw):
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+
+    return (
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    )
+
+
+def quaternion_to_euler(q0, q1, q2, q3):
+    roll = math.atan2(
+        2.0 * (q0 * q1 + q2 * q3),
+        1.0 - 2.0 * (q1 * q1 + q2 * q2),
+    )
+    pitch_argument = 2.0 * (q0 * q2 - q3 * q1)
+    pitch_argument = max(-1.0, min(1.0, pitch_argument))
+    pitch = math.asin(pitch_argument)
+    yaw = math.atan2(
+        2.0 * (q0 * q3 + q1 * q2),
+        1.0 - 2.0 * (q2 * q2 + q3 * q3),
+    )
+    return roll, pitch, yaw
+
+
+def normalize_angle_degrees(angle):
+    while angle > 180.0:
+        angle -= 360.0
+    while angle <= -180.0:
+        angle += 360.0
+    return angle
+
+
+class MadgwickIMU:
+    def __init__(self, beta=MADGWICK_BETA):
+        self.beta = beta
+        self.q0 = 1.0
+        self.q1 = 0.0
+        self.q2 = 0.0
+        self.q3 = 0.0
+
+    def set_from_accel(self, accel_x, accel_y, accel_z):
+        roll = math.atan2(
+            accel_y,
+            math.sqrt(accel_x * accel_x + accel_z * accel_z),
+        )
+        pitch = math.atan2(
+            -accel_x,
+            math.sqrt(accel_y * accel_y + accel_z * accel_z),
+        )
+        self.q0, self.q1, self.q2, self.q3 = euler_to_quaternion(roll, pitch, 0.0)
+
+    def update(self, gyro_x, gyro_y, gyro_z, accel_x, accel_y, accel_z, dt):
+        q0 = self.q0
+        q1 = self.q1
+        q2 = self.q2
+        q3 = self.q3
+
+        q_dot0 = 0.5 * (-q1 * gyro_x - q2 * gyro_y - q3 * gyro_z)
+        q_dot1 = 0.5 * (q0 * gyro_x + q2 * gyro_z - q3 * gyro_y)
+        q_dot2 = 0.5 * (q0 * gyro_y - q1 * gyro_z + q3 * gyro_x)
+        q_dot3 = 0.5 * (q0 * gyro_z + q1 * gyro_y - q2 * gyro_x)
+
+        accel_norm = math.sqrt(accel_x * accel_x + accel_y * accel_y + accel_z * accel_z)
+        if accel_norm > 0.0:
+            ax = accel_x / accel_norm
+            ay = accel_y / accel_norm
+            az = accel_z / accel_norm
+
+            double_q0 = 2.0 * q0
+            double_q1 = 2.0 * q1
+            double_q2 = 2.0 * q2
+            double_q3 = 2.0 * q3
+            four_q0 = 4.0 * q0
+            four_q1 = 4.0 * q1
+            four_q2 = 4.0 * q2
+            eight_q1 = 8.0 * q1
+            eight_q2 = 8.0 * q2
+            q0q0 = q0 * q0
+            q1q1 = q1 * q1
+            q2q2 = q2 * q2
+            q3q3 = q3 * q3
+
+            s0 = four_q0 * q2q2 + double_q2 * ax + four_q0 * q1q1 - double_q1 * ay
+            s1 = (
+                four_q1 * q3q3
+                - double_q3 * ax
+                + 4.0 * q0q0 * q1
+                - double_q0 * ay
+                - four_q1
+                + eight_q1 * q1q1
+                + eight_q1 * q2q2
+                + four_q1 * az
+            )
+            s2 = (
+                4.0 * q0q0 * q2
+                + double_q0 * ax
+                + four_q2 * q3q3
+                - double_q3 * ay
+                - four_q2
+                + eight_q2 * q1q1
+                + eight_q2 * q2q2
+                + four_q2 * az
+            )
+            s3 = 4.0 * q1q1 * q3 - double_q1 * ax + 4.0 * q2q2 * q3 - double_q2 * ay
+
+            step_norm = math.sqrt(s0 * s0 + s1 * s1 + s2 * s2 + s3 * s3)
+            if step_norm > 0.0:
+                s0 /= step_norm
+                s1 /= step_norm
+                s2 /= step_norm
+                s3 /= step_norm
+                q_dot0 -= self.beta * s0
+                q_dot1 -= self.beta * s1
+                q_dot2 -= self.beta * s2
+                q_dot3 -= self.beta * s3
+
+        q0 += q_dot0 * dt
+        q1 += q_dot1 * dt
+        q2 += q_dot2 * dt
+        q3 += q_dot3 * dt
+
+        q_norm = math.sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3)
+        if q_norm > 0.0:
+            self.q0 = q0 / q_norm
+            self.q1 = q1 / q_norm
+            self.q2 = q2 / q_norm
+            self.q3 = q3 / q_norm
+
+    def euler_degrees(self):
+        roll, pitch, yaw = quaternion_to_euler(self.q0, self.q1, self.q2, self.q3)
+        return (
+            math.degrees(roll),
+            math.degrees(pitch),
+            normalize_angle_degrees(math.degrees(yaw)),
+        )
+
+
 class LevelingController:
     def __init__(self):
         self.enabled = False
         self.mpu = None
+        self.filter = MadgwickIMU()
         self.roll = 0.0
         self.pitch = 0.0
         self.roll_degrees = 0.0
         self.pitch_degrees = 0.0
+        self.yaw_degrees = 0.0
+        self.gyro_bias = (0.0, 0.0, 0.0)
         self.read_errors = 0
         self.last_sample_time = 0.0
 
@@ -659,10 +817,43 @@ class LevelingController:
                 MPU_I2C_BUS,
                 address=MPU6050_ADDRESS,
             )
+            accel_x, accel_y, accel_z = self.mpu.acceleration
+            self.filter.set_from_accel(accel_x, accel_y, accel_z)
+            self.gyro_bias = self.calibrate_gyro()
+            self.last_sample_time = time.monotonic()
             self.enabled = True
-            print(f"MPU6050 leveling enabled at address 0x{MPU6050_ADDRESS:02x}.")
+            print(
+                "MPU6050 Madgwick orientation enabled at "
+                f"address 0x{MPU6050_ADDRESS:02x}."
+            )
         except Exception as error:
             print(f"MPU6050 leveling disabled: {error}")
+
+    def calibrate_gyro(self):
+        gyro_x_total = 0.0
+        gyro_y_total = 0.0
+        gyro_z_total = 0.0
+        samples = 0
+
+        for _ in range(GYRO_CALIBRATION_SAMPLES):
+            try:
+                gyro_x, gyro_y, gyro_z = self.mpu.gyro
+            except Exception:
+                continue
+            gyro_x_total += gyro_x
+            gyro_y_total += gyro_y
+            gyro_z_total += gyro_z
+            samples += 1
+            time.sleep(GYRO_CALIBRATION_DELAY)
+
+        if samples == 0:
+            return 0.0, 0.0, 0.0
+
+        return (
+            gyro_x_total / samples,
+            gyro_y_total / samples,
+            gyro_z_total / samples,
+        )
 
     def attitude(self):
         if not self.enabled:
@@ -671,10 +862,11 @@ class LevelingController:
         now = time.monotonic()
         if now - self.last_sample_time < LEVEL_SAMPLE_INTERVAL:
             return {"roll": self.roll, "pitch": self.pitch}
-        self.last_sample_time = now
+        previous_sample_time = self.last_sample_time
 
         try:
             accel_x, accel_y, accel_z = self.mpu.acceleration
+            gyro_x, gyro_y, gyro_z = self.mpu.gyro
         except Exception as error:
             self.read_errors += 1
             if self.read_errors >= LEVEL_MAX_READ_ERRORS:
@@ -688,12 +880,19 @@ class LevelingController:
             return {"roll": self.roll, "pitch": self.pitch}
 
         self.read_errors = 0
-
-        self.roll_degrees = math.degrees(
-            math.atan2(accel_y, math.sqrt(accel_x * accel_x + accel_z * accel_z))
+        dt = max(0.001, min(0.25, now - previous_sample_time))
+        self.last_sample_time = now
+        self.filter.update(
+            gyro_x - self.gyro_bias[0],
+            gyro_y - self.gyro_bias[1],
+            gyro_z - self.gyro_bias[2],
+            accel_x,
+            accel_y,
+            accel_z,
+            dt,
         )
-        self.pitch_degrees = math.degrees(
-            math.atan2(-accel_x, math.sqrt(accel_y * accel_y + accel_z * accel_z))
+        self.roll_degrees, self.pitch_degrees, self.yaw_degrees = (
+            self.filter.euler_degrees()
         )
 
         target_roll = max(
@@ -726,7 +925,71 @@ class LevelingController:
         self.attitude()
         print(
             f"{label} -> "
-            f"roll {self.roll_degrees:.1f} deg, pitch {self.pitch_degrees:.1f} deg"
+            f"roll {self.roll_degrees:.1f} deg, "
+            f"pitch {self.pitch_degrees:.1f} deg, "
+            f"yaw {self.yaw_degrees:.1f} deg"
+        )
+
+
+class WalkOdometer:
+    def __init__(self):
+        self.forward_mm = 0.0
+        self.right_mm = 0.0
+        self.commanded_heading_degrees = 0.0
+        self.last_report_time = 0.0
+
+    def add_completed_half_cycle(self, direction, steering=0.0, leveler=None):
+        forward_delta = 0.0
+        right_delta = 0.0
+
+        if direction in (1, 4):
+            forward_delta = WALK_FORWARD_MM_PER_HALF_CYCLE
+        elif direction in (-1, -4):
+            forward_delta = -WALK_FORWARD_MM_PER_HALF_CYCLE
+        elif direction == 2:
+            right_delta = -WALK_LATERAL_MM_PER_HALF_CYCLE
+        elif direction == -2:
+            right_delta = WALK_LATERAL_MM_PER_HALF_CYCLE
+
+        self.forward_mm += forward_delta
+        self.right_mm += right_delta
+
+        if direction in (-4, 4):
+            walk_sign = 1.0 if direction > 0 else -1.0
+            self.commanded_heading_degrees = normalize_angle_degrees(
+                self.commanded_heading_degrees
+                + steering * walk_sign * WALK_STEER_YAW_DEG_PER_HALF_CYCLE
+            )
+        elif direction in (-3, 3):
+            self.commanded_heading_degrees = normalize_angle_degrees(
+                self.commanded_heading_degrees
+                + direction / 3.0 * WALK_TURN_DEG_PER_HALF_CYCLE
+            )
+
+        now = time.monotonic()
+        if now - self.last_report_time >= ODOMETRY_REPORT_INTERVAL:
+            self.last_report_time = now
+            self.print_report(leveler)
+
+    def print_report(self, leveler=None):
+        distance = math.hypot(self.forward_mm, self.right_mm)
+        direction_degrees = (
+            math.degrees(math.atan2(self.right_mm, self.forward_mm))
+            if distance > 0.0
+            else 0.0
+        )
+        yaw = (
+            leveler.yaw_degrees
+            if leveler is not None and leveler.enabled
+            else self.commanded_heading_degrees
+        )
+        print(
+            "Walk odometry from MPU front -> "
+            f"forward {self.forward_mm:.0f} mm, "
+            f"right {self.right_mm:.0f} mm, "
+            f"distance {distance:.0f} mm, "
+            f"direction {direction_degrees:.1f} deg, "
+            f"yaw {yaw:.1f} deg"
         )
 
 
@@ -1162,6 +1425,7 @@ def controller_walk_control(home_pose, device_path):
     set_all_legs_offsets(home_pose[0], home_pose[1], delay=WALK_SETTLE_DELAY)
     set_all_hip_offsets(0.0, delay=0.0)
     leveler = LevelingController()
+    odometer = WalkOdometer()
 
     with ControllerInput(device_path) as controller:
         while True:
@@ -1344,9 +1608,11 @@ def controller_walk_control(home_pose, device_path):
                 continue
 
             if cycle_complete:
+                odometer.add_completed_half_cycle(direction, steering, leveler)
                 leveler.print_angles("MPU6050 ground-contact angle")
                 next_swing = stance_tripod
 
+    odometer.print_report(leveler)
     hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
 
 
