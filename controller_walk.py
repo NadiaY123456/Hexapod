@@ -992,20 +992,17 @@ class WalkOdometer:
         self.last_report_time = 0.0
 
     def add_completed_half_cycle(self, direction, steering=0.0, leveler=None):
-        forward_delta = 0.0
-        right_delta = 0.0
+        body_forward_delta = 0.0
+        body_right_delta = 0.0
 
         if direction in (1, 4):
-            forward_delta = WALK_FORWARD_MM_PER_HALF_CYCLE
+            body_forward_delta = WALK_FORWARD_MM_PER_HALF_CYCLE
         elif direction in (-1, -4):
-            forward_delta = -WALK_FORWARD_MM_PER_HALF_CYCLE
+            body_forward_delta = -WALK_FORWARD_MM_PER_HALF_CYCLE
         elif direction == 2:
-            right_delta = -WALK_LATERAL_MM_PER_HALF_CYCLE
+            body_right_delta = -WALK_LATERAL_MM_PER_HALF_CYCLE
         elif direction == -2:
-            right_delta = WALK_LATERAL_MM_PER_HALF_CYCLE
-
-        self.forward_mm += forward_delta
-        self.right_mm += right_delta
+            body_right_delta = WALK_LATERAL_MM_PER_HALF_CYCLE
 
         if direction in (-4, 4):
             walk_sign = 1.0 if direction > 0 else -1.0
@@ -1019,10 +1016,29 @@ class WalkOdometer:
                 + direction / 3.0 * WALK_TURN_DEG_PER_HALF_CYCLE
             )
 
+        yaw_degrees = self.heading_degrees(leveler)
+        yaw = math.radians(yaw_degrees)
+        world_forward_delta = (
+            body_forward_delta * math.cos(yaw)
+            + body_right_delta * math.sin(yaw)
+        )
+        world_right_delta = (
+            -body_forward_delta * math.sin(yaw)
+            + body_right_delta * math.cos(yaw)
+        )
+
+        self.forward_mm += world_forward_delta
+        self.right_mm += world_right_delta
+
         now = time.monotonic()
         if now - self.last_report_time >= ODOMETRY_REPORT_INTERVAL:
             self.last_report_time = now
             self.print_report(leveler)
+
+    def heading_degrees(self, leveler=None):
+        if leveler is not None and leveler.enabled:
+            return leveler.yaw_degrees
+        return self.commanded_heading_degrees
 
     def print_report(self, leveler=None):
         distance = math.hypot(self.forward_mm, self.right_mm)
@@ -1031,13 +1047,9 @@ class WalkOdometer:
             if distance > 0.0
             else 0.0
         )
-        yaw = (
-            leveler.yaw_degrees
-            if leveler is not None and leveler.enabled
-            else self.commanded_heading_degrees
-        )
+        yaw = self.heading_degrees(leveler)
         print(
-            "Walk odometry from MPU front -> "
+            "Walk odometry from start frame -> "
             f"forward {self.forward_mm:.0f} mm, "
             f"right {self.right_mm:.0f} mm, "
             f"distance {distance:.0f} mm, "
