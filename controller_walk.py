@@ -247,8 +247,9 @@ LEVEL_PITCH_SIGN = -1.0
 LEVEL_MAX_ATTITUDE = 0.70
 LEVEL_FILTER_ALPHA = 0.75
 LEVEL_SAMPLE_INTERVAL = 0.05
-LEVEL_MOVING_PITCH_SCALE = 0.35
-LEVEL_FORWARD_PITCH_SCALE = 0.65
+LEVEL_MOVING_ROLL_SCALE = 1.0
+LEVEL_MOVING_PITCH_SCALE = 0.75
+LEVEL_FORWARD_PITCH_SCALE = 1.0
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
 MPU_READ_RETRY_DELAY = 0.008
@@ -896,12 +897,12 @@ class LevelingController:
             gyro_z_total / samples,
         )
 
-    def attitude(self):
+    def attitude(self, force=False):
         if not self.enabled:
             return {"roll": 0.0, "pitch": 0.0}
 
         now = time.monotonic()
-        if now - self.last_sample_time < LEVEL_SAMPLE_INTERVAL:
+        if not force and now - self.last_sample_time < LEVEL_SAMPLE_INTERVAL:
             return {"roll": self.roll, "pitch": self.pitch}
         previous_sample_time = self.last_sample_time
 
@@ -972,10 +973,10 @@ class LevelingController:
             f"({self.read_errors}/{LEVEL_MAX_READ_ERRORS}): {error}"
         )
 
-    def print_angles(self, label="MPU6050 angle"):
+    def print_angles(self, label="MPU6050 angle", force=False):
         if not self.enabled:
             return
-        self.attitude()
+        self.attitude(force=force)
         print(
             f"{label} -> "
             f"roll {self.roll_degrees:.1f} deg, "
@@ -1058,14 +1059,23 @@ class WalkOdometer:
         )
 
 
-def combined_attitude(manual_attitude, leveler=None, pitch_scale=1.0):
-    level_attitude = (
-        leveler.attitude()
-        if leveler is not None
-        else {"roll": 0.0, "pitch": 0.0}
-    )
+def combined_attitude(
+    manual_attitude,
+    leveler=None,
+    roll_scale=1.0,
+    pitch_scale=1.0,
+    level_attitude=None,
+):
+    if level_attitude is None:
+        level_attitude = (
+            leveler.attitude()
+            if leveler is not None
+            else {"roll": 0.0, "pitch": 0.0}
+        )
     return {
-        "roll": clamp_unit(manual_attitude.get("roll", 0.0) + level_attitude["roll"]),
+        "roll": clamp_unit(
+            manual_attitude.get("roll", 0.0) + level_attitude["roll"] * roll_scale
+        ),
         "pitch": clamp_unit(
             manual_attitude.get("pitch", 0.0)
             + level_attitude["pitch"] * pitch_scale
@@ -1073,10 +1083,10 @@ def combined_attitude(manual_attitude, leveler=None, pitch_scale=1.0):
     }
 
 
-def moving_pitch_scale(direction):
+def moving_level_scales(direction):
     if direction in (1, 4):
-        return LEVEL_FORWARD_PITCH_SCALE
-    return LEVEL_MOVING_PITCH_SCALE
+        return LEVEL_MOVING_ROLL_SCALE, LEVEL_FORWARD_PITCH_SCALE
+    return LEVEL_MOVING_ROLL_SCALE, LEVEL_MOVING_PITCH_SCALE
 
 
 def button_turn_direction(button_values):
@@ -1377,6 +1387,12 @@ def controller_walk_half_cycle(
     if attitude is None:
         attitude = {"roll": 0.0, "pitch": 0.0}
 
+    walk_level_attitude = (
+        leveler.attitude(force=True)
+        if leveler is not None
+        else {"roll": 0.0, "pitch": 0.0}
+    )
+
     for step in range(WALK_HALF_CYCLE_STEPS + 1):
         direction, steering, stop_requested, posture_action = poll_controller_motion(
             controller,
@@ -1389,10 +1405,13 @@ def controller_walk_half_cycle(
             hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
             return direction, steering, stop_requested, posture_action, False
 
+        walk_roll_scale, walk_pitch_scale = moving_level_scales(direction)
         active_attitude = combined_attitude(
             attitude,
             leveler,
-            pitch_scale=moving_pitch_scale(direction),
+            roll_scale=walk_roll_scale,
+            pitch_scale=walk_pitch_scale,
+            level_attitude=walk_level_attitude,
         )
         set_walk_frame(
             home_pose,
@@ -1674,7 +1693,7 @@ def controller_walk_control(home_pose, device_path):
 
             if cycle_complete:
                 odometer.add_completed_half_cycle(direction, steering, leveler)
-                leveler.print_angles("MPU6050 ground-contact angle")
+                leveler.print_angles("MPU6050 ground-contact angle", force=True)
                 next_swing = stance_tripod
 
     odometer.print_report(leveler)
