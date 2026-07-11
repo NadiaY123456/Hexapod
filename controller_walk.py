@@ -1745,28 +1745,31 @@ def run_stand_up_sequence():
     return DROP_TO_POSE
 
 
-try:
+def main():
     args = parse_args()
     validate_ik_constants()
 
-    walk_home_pose = run_stand_up_sequence()
+    try:
+        walk_home_pose = run_stand_up_sequence()
 
-    if CONTROLLER_WALK_AFTER_STAND:
-        print("Step 5: Controller walking control")
-        try:
-            controller_walk_control(walk_home_pose, args.device)
-        except RuntimeError as error:
-            print(f"{error} Holding standing pose instead.")
-    elif WALK_AFTER_STAND:
-        print("Step 5: Run tripod walking cycles")
-        walk_tripod_cycles(DROP_TO_POSE, cycles=WALK_CYCLES)
+        if CONTROLLER_WALK_AFTER_STAND:
+            print("Step 5: Controller walking control")
+            try:
+                controller_walk_control(walk_home_pose, args.device)
+            except RuntimeError as error:
+                print(f"{error} Holding standing pose instead.")
+        elif WALK_AFTER_STAND:
+            print("Step 5: Run tripod walking cycles")
+            walk_tripod_cycles(DROP_TO_POSE, cycles=WALK_CYCLES)
 
-    print("Standing pose reached. Holding foot and knee positions.")
-    while True:
-        time.sleep(1)
+        print("Standing pose reached. Holding foot and knee positions.")
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("Stopped by user.")
+    finally:
+        release_all()
 
-except KeyboardInterrupt:
-    print("Stopped by user.")
 
-finally:
-    release_all()
+if __name__ == "__main__":
+    main()
