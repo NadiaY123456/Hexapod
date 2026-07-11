@@ -97,6 +97,12 @@ def get_args():
         help="Stop approaching when person box fills this frame fraction (default: 0.30).",
     )
     parser.add_argument(
+        "--close-turn-error",
+        type=float,
+        default=0.52,
+        help="At close range, turn only beyond this horizontal error (default: 0.52).",
+    )
+    parser.add_argument(
         "--max-steering",
         type=float,
         default=0.25,
@@ -133,6 +139,8 @@ def get_args():
         parser.error("deadzone must be below turn-in-place-error, both within 0..1")
     if not 0.0 < args.stop_area < 1.0:
         parser.error("stop-area must be within 0..1")
+    if not args.center_deadzone < args.close_turn_error <= 1.0:
+        parser.error("close-turn-error must exceed center-deadzone and be at most 1")
     if not 0.0 <= args.max_steering <= 1.0:
         parser.error("max-steering must be within 0..1")
     if not 0.0 < args.turn_scale <= 1.0:
@@ -179,9 +187,18 @@ def command_for_person(person, frame_size, args):
     center_error = (person.center[0] - frame_w / 2) / (frame_w / 2)
     area_ratio = (person.box[2] * person.box[3]) / (frame_w * frame_h)
 
-    # Distance safety takes priority over centering. Once close enough, do not
-    # rotate back and forth just because the box jitters horizontally.
+    # Stop approaching at close range. Keep a wide stationary zone to reject
+    # box jitter, but allow a gentle in-place correction for a person who is
+    # clearly far to one side.
     if area_ratio >= args.stop_area:
+        if abs(center_error) >= args.close_turn_error:
+            direction = 3 if center_error > 0 else -3
+            side = "right" if center_error > 0 else "left"
+            return (
+                FollowCommand(direction, 0.0, f"close; gently turn {side}"),
+                center_error,
+                area_ratio,
+            )
         return FollowCommand(0, 0.0, "close enough; hold still"), center_error, area_ratio
 
     if abs(center_error) >= args.turn_in_place_error:
