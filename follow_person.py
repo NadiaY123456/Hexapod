@@ -17,6 +17,7 @@ from functools import lru_cache
 from ai_camera_object_detection import (
     DEFAULT_MODEL,
     Detection,
+    DetectionPrinter,
     import_camera_stack,
     load_labels,
     rectangle_to_box,
@@ -72,6 +73,12 @@ def get_args():
     parser.add_argument("--fps", type=int, help="Override camera inference frame rate.")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
+        "--print-interval",
+        type=float,
+        default=0.25,
+        help="Seconds between JSON detection-location updates (default: 0.25).",
+    )
+    parser.add_argument(
         "--center-deadzone",
         type=float,
         default=0.12,
@@ -86,8 +93,8 @@ def get_args():
     parser.add_argument(
         "--stop-area",
         type=float,
-        default=0.34,
-        help="Stop approaching when person box fills this frame fraction (default: 0.34).",
+        default=0.52,
+        help="Stop approaching when person box fills this frame fraction (default: 0.52).",
     )
     parser.add_argument(
         "--lost-timeout",
@@ -108,6 +115,8 @@ def get_args():
         parser.error("deadzone must be below turn-in-place-error, both within 0..1")
     if not 0.0 < args.stop_area < 1.0:
         parser.error("stop-area must be within 0..1")
+    if args.print_interval < 0.0:
+        parser.error("print-interval cannot be negative")
     return args
 
 
@@ -140,12 +149,18 @@ def command_for_person(person, frame_size, args):
         side = "right" if center_error > 0 else "left"
         return FollowCommand(direction, 0.0, f"close; center {side}"), center_error, area_ratio
 
-    steering = 0.0
-    if abs(center_error) > args.center_deadzone:
-        usable_range = 1.0 - args.center_deadzone
-        steering = (abs(center_error) - args.center_deadzone) / usable_range
-        steering = min(1.0, steering) * (1.0 if center_error > 0 else -1.0)
-    return FollowCommand(4, steering, "walk forward"), center_error, area_ratio
+    if abs(center_error) <= args.center_deadzone:
+        # Direction 1 is controller_walk's plain D-pad-forward gait.
+        return FollowCommand(1, 0.0, "walk straight forward"), center_error, area_ratio
+
+    usable_range = args.turn_in_place_error - args.center_deadzone
+    steering = (abs(center_error) - args.center_deadzone) / usable_range
+    steering = min(1.0, steering)
+    # The physical steering bias is opposite the camera's horizontal error on
+    # this robot. In-place turning has its own separately calibrated sign.
+    steering *= -1.0 if center_error > 0 else 1.0
+    side = "right" if center_error > 0 else "left"
+    return FollowCommand(4, steering, f"walk forward; steer {side}"), center_error, area_ratio
 
 
 def main():
@@ -177,6 +192,7 @@ def main():
     target = None
     following = True
     status_text = "FOLLOWING: looking for person"
+    detection_printer = DetectionPrinter(args.print_interval, [])
 
     @lru_cache
     def model_labels():
@@ -267,6 +283,7 @@ def main():
                 metadata = picam2.capture_metadata()
                 current_target = choose_person(parse_detections(metadata))
                 frame_size = picam2.camera_configuration()["main"]["size"]
+                detection_printer.print(detections, frame_size)
                 now = time.monotonic()
                 if current_target is not None:
                     target = current_target
