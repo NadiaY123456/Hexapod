@@ -126,7 +126,9 @@ def command_for_person(person, frame_size, args):
     area_ratio = (person.box[2] * person.box[3]) / (frame_w * frame_h)
 
     if abs(center_error) >= args.turn_in_place_error:
-        direction = -3 if center_error > 0 else 3
+        # Camera +x is screen-right. The physical in-place turn direction on
+        # this robot is opposite controller_walk's direction-name convention.
+        direction = 3 if center_error > 0 else -3
         side = "right" if center_error > 0 else "left"
         return FollowCommand(direction, 0.0, f"turn in place {side}"), center_error, area_ratio
 
@@ -134,7 +136,7 @@ def command_for_person(person, frame_size, args):
         if abs(center_error) <= args.center_deadzone:
             return FollowCommand(0, 0.0, "close enough"), center_error, area_ratio
         # At close range, rotate without moving closer until centered.
-        direction = -3 if center_error > 0 else 3
+        direction = 3 if center_error > 0 else -3
         side = "right" if center_error > 0 else "left"
         return FollowCommand(direction, 0.0, f"close; center {side}"), center_error, area_ratio
 
