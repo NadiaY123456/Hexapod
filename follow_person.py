@@ -81,20 +81,38 @@ def get_args():
     parser.add_argument(
         "--center-deadzone",
         type=float,
-        default=0.12,
-        help="Horizontal normalized error treated as centered (default: 0.12).",
+        default=0.25,
+        help="Horizontal normalized error treated as centered (default: 0.25).",
     )
     parser.add_argument(
         "--turn-in-place-error",
         type=float,
-        default=0.42,
-        help="Error above which the robot turns in place (default: 0.42).",
+        default=0.68,
+        help="Error above which the robot turns in place (default: 0.68).",
     )
     parser.add_argument(
         "--stop-area",
         type=float,
-        default=0.52,
-        help="Stop approaching when person box fills this frame fraction (default: 0.52).",
+        default=0.30,
+        help="Stop approaching when person box fills this frame fraction (default: 0.30).",
+    )
+    parser.add_argument(
+        "--max-steering",
+        type=float,
+        default=0.25,
+        help="Maximum walking steering correction (default: 0.25).",
+    )
+    parser.add_argument(
+        "--turn-scale",
+        type=float,
+        default=0.30,
+        help="Scale applied to autonomous in-place hip swing (default: 0.30).",
+    )
+    parser.add_argument(
+        "--tracking-alpha",
+        type=float,
+        default=0.20,
+        help="Target smoothing factor; lower is calmer (default: 0.20).",
     )
     parser.add_argument(
         "--lost-timeout",
@@ -115,6 +133,12 @@ def get_args():
         parser.error("deadzone must be below turn-in-place-error, both within 0..1")
     if not 0.0 < args.stop_area < 1.0:
         parser.error("stop-area must be within 0..1")
+    if not 0.0 <= args.max_steering <= 1.0:
+        parser.error("max-steering must be within 0..1")
+    if not 0.0 < args.turn_scale <= 1.0:
+        parser.error("turn-scale must be within 0..1")
+    if not 0.0 < args.tracking_alpha <= 1.0:
+        parser.error("tracking-alpha must be within 0..1")
     if args.print_interval < 0.0:
         parser.error("print-interval cannot be negative")
     return args
@@ -129,10 +153,36 @@ def choose_person(detections):
     return max(people, key=lambda item: (item.box[2] * item.box[3], item.confidence))
 
 
+def smooth_detection(previous, current, alpha):
+    """Low-pass filter a target so detection jitter cannot reverse the gait."""
+    if previous is None:
+        return current
+
+    def blend(old, new):
+        return old + alpha * (new - old)
+
+    box = tuple(blend(old, new) for old, new in zip(previous.box, current.box))
+    center = tuple(
+        blend(old, new) for old, new in zip(previous.center, current.center)
+    )
+    return Detection(
+        label=current.label,
+        category=current.category,
+        confidence=current.confidence,
+        box=box,
+        center=center,
+    )
+
+
 def command_for_person(person, frame_size, args):
     frame_w, frame_h = frame_size
     center_error = (person.center[0] - frame_w / 2) / (frame_w / 2)
     area_ratio = (person.box[2] * person.box[3]) / (frame_w * frame_h)
+
+    # Distance safety takes priority over centering. Once close enough, do not
+    # rotate back and forth just because the box jitters horizontally.
+    if area_ratio >= args.stop_area:
+        return FollowCommand(0, 0.0, "close enough; hold still"), center_error, area_ratio
 
     if abs(center_error) >= args.turn_in_place_error:
         # Camera +x is screen-right. The physical in-place turn direction on
@@ -141,21 +191,13 @@ def command_for_person(person, frame_size, args):
         side = "right" if center_error > 0 else "left"
         return FollowCommand(direction, 0.0, f"turn in place {side}"), center_error, area_ratio
 
-    if area_ratio >= args.stop_area:
-        if abs(center_error) <= args.center_deadzone:
-            return FollowCommand(0, 0.0, "close enough"), center_error, area_ratio
-        # At close range, rotate without moving closer until centered.
-        direction = 3 if center_error > 0 else -3
-        side = "right" if center_error > 0 else "left"
-        return FollowCommand(direction, 0.0, f"close; center {side}"), center_error, area_ratio
-
     if abs(center_error) <= args.center_deadzone:
         # Direction 1 is controller_walk's plain D-pad-forward gait.
         return FollowCommand(1, 0.0, "walk straight forward"), center_error, area_ratio
 
     usable_range = args.turn_in_place_error - args.center_deadzone
     steering = (abs(center_error) - args.center_deadzone) / usable_range
-    steering = min(1.0, steering)
+    steering = min(args.max_steering, steering * args.max_steering)
     # The physical steering bias is opposite the camera's horizontal error on
     # this robot. In-place turning has its own separately calibrated sign.
     steering *= -1.0 if center_error > 0 else 1.0
@@ -286,7 +328,11 @@ def main():
                 detection_printer.print(detections, frame_size)
                 now = time.monotonic()
                 if current_target is not None:
-                    target = current_target
+                    target = smooth_detection(
+                        target,
+                        current_target,
+                        args.tracking_alpha,
+                    )
                     last_seen = now
                 elif now - last_seen > args.lost_timeout:
                     target = None
@@ -313,7 +359,12 @@ def main():
                 stance_tripod = walk.TRIPOD_B if next_swing == walk.TRIPOD_A else walk.TRIPOD_A
                 walk.walk_half_cycle(home_pose, next_swing, stance_tripod,
                                      direction=command.direction,
-                                     steering=command.steering)
+                                     steering=command.steering,
+                                     hip_swing_scale=(
+                                         args.turn_scale
+                                         if abs(command.direction) == 3
+                                         else 1.0
+                                     ))
                 next_swing = stance_tripod
     except KeyboardInterrupt:
         print("\nStopped by user.")

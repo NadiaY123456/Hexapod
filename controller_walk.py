@@ -1247,6 +1247,7 @@ def set_walk_frame(
     direction=1,
     steering=0.0,
     attitude=None,
+    hip_swing_scale=1.0,
 ):
     if attitude is None:
         attitude = {"roll": 0.0, "pitch": 0.0}
@@ -1261,6 +1262,7 @@ def set_walk_frame(
         hip_swing = TURN_IN_PLACE_HIP_SWING_DEG
     else:
         hip_swing = WALK_HIP_SWING_DEG
+    hip_swing *= hip_swing_scale
     swing_hip = -hip_swing + (2 * hip_swing * eased_t)
     stance_hip = hip_swing - (2 * hip_swing * eased_t)
 
@@ -1316,6 +1318,7 @@ def walk_half_cycle(
     direction=1,
     steering=0.0,
     attitude=None,
+    hip_swing_scale=1.0,
 ):
     for step in range(WALK_HALF_CYCLE_STEPS + 1):
         set_walk_frame(
@@ -1326,6 +1329,7 @@ def walk_half_cycle(
             direction=direction,
             steering=steering,
             attitude=attitude,
+            hip_swing_scale=hip_swing_scale,
         )
         time.sleep(WALK_FRAME_DELAY)
 
