@@ -81,14 +81,14 @@ def get_args():
     parser.add_argument(
         "--center-deadzone",
         type=float,
-        default=0.15,
-        help="Horizontal normalized error treated as centered (default: 0.15).",
+        default=0.20,
+        help="Horizontal normalized error treated as centered (default: 0.20).",
     )
     parser.add_argument(
         "--turn-in-place-error",
         type=float,
-        default=0.50,
-        help="Error above which the robot turns in place (default: 0.50).",
+        default=0.58,
+        help="Error above which the robot turns in place (default: 0.58).",
     )
     parser.add_argument(
         "--stop-area",
@@ -99,26 +99,26 @@ def get_args():
     parser.add_argument(
         "--close-turn-error",
         type=float,
-        default=0.40,
-        help="At close range, turn only beyond this horizontal error (default: 0.40).",
+        default=0.46,
+        help="At close range, turn only beyond this horizontal error (default: 0.46).",
     )
     parser.add_argument(
         "--max-steering",
         type=float,
-        default=0.40,
-        help="Maximum walking steering correction (default: 0.40).",
+        default=0.30,
+        help="Maximum walking steering correction (default: 0.30).",
     )
     parser.add_argument(
         "--turn-scale",
         type=float,
-        default=0.60,
-        help="Scale applied to autonomous in-place hip swing (default: 0.60).",
+        default=0.50,
+        help="Scale applied to autonomous in-place hip swing (default: 0.50).",
     )
     parser.add_argument(
         "--tracking-alpha",
         type=float,
-        default=0.55,
-        help="Target smoothing factor; higher reacts faster (default: 0.55).",
+        default=0.40,
+        help="Target smoothing factor; higher reacts faster (default: 0.40).",
     )
     parser.add_argument(
         "--lost-timeout",
@@ -129,20 +129,26 @@ def get_args():
     parser.add_argument(
         "--search-timeout",
         type=float,
-        default=1.5,
-        help="Turn toward the last-seen motion after detection is lost (default: 1.5).",
+        default=1.0,
+        help="Turn toward the last-seen motion after detection is lost (default: 1.0).",
     )
     parser.add_argument(
         "--walk-steps",
         type=int,
-        default=6,
-        help="Interpolation steps per autonomous half-cycle (default: 6).",
+        default=7,
+        help="Interpolation steps per autonomous half-cycle (default: 7).",
     )
     parser.add_argument(
         "--walk-frame-delay",
         type=float,
-        default=0.018,
-        help="Seconds between autonomous gait frames (default: 0.018).",
+        default=0.022,
+        help="Seconds between autonomous gait frames (default: 0.022).",
+    )
+    parser.add_argument(
+        "--leveling-scale",
+        type=float,
+        default=0.65,
+        help="Scale applied to live MPU6050 walking correction (default: 0.65).",
     )
     parser.add_argument(
         "--bbox-normalization", action=argparse.BooleanOptionalAction
@@ -173,6 +179,8 @@ def get_args():
         parser.error("walk-steps must be at least 1")
     if args.walk_frame_delay < 0.0:
         parser.error("walk-frame-delay cannot be negative")
+    if not 0.0 <= args.leveling_scale <= 1.0:
+        parser.error("leveling-scale must be within 0..1")
     if args.print_interval < 0.0:
         parser.error("print-interval cannot be negative")
     return args
@@ -346,6 +354,7 @@ def main():
         picam2.pre_callback = draw_overlay
 
     home_pose = None
+    leveler = None
     last_seen = 0.0
     last_raw_error = None
     search_direction = 0
@@ -357,6 +366,16 @@ def main():
         walk.validate_ik_constants()
         home_pose = walk.run_stand_up_sequence()
         walk.hold_standing_pose(home_pose)
+        leveler = walk.LevelingController()
+
+        def autonomous_attitude(direction=0):
+            level_attitude = leveler.attitude()
+            roll_scale, pitch_scale = walk.moving_level_scales(direction)
+            return {
+                "roll": level_attitude["roll"] * roll_scale * args.leveling_scale,
+                "pitch": level_attitude["pitch"] * pitch_scale * args.leveling_scale,
+            }
+
         print("Following enabled. Space=pause/resume, Q or Escape=quit.")
         with KeyboardControls() as keyboard:
             while True:
@@ -364,7 +383,7 @@ def main():
                     if key == b" ":
                         following = not following
                         if not following:
-                            walk.hold_standing_pose(home_pose)
+                            walk.hold_standing_pose(home_pose, autonomous_attitude())
                         print("Following enabled." if following else "Following paused.")
                     elif key.lower() == b"q" or key == b"\x1b":
                         return 0
@@ -419,7 +438,7 @@ def main():
                         area = 0.0
                     else:
                         status_text = "FOLLOWING: looking for person"
-                        walk.hold_standing_pose(home_pose)
+                        walk.hold_standing_pose(home_pose, autonomous_attitude())
                         last_command = None
                         continue
                 else:
@@ -431,7 +450,7 @@ def main():
                     print(status_text)
                     last_command = command_key
                 if command.direction == 0:
-                    walk.hold_standing_pose(home_pose)
+                    walk.hold_standing_pose(home_pose, autonomous_attitude())
                     continue
 
                 stance_tripod = walk.TRIPOD_B if next_swing == walk.TRIPOD_A else walk.TRIPOD_A
@@ -444,7 +463,10 @@ def main():
                                          else 1.0
                                      ),
                                      interpolation_steps=args.walk_steps,
-                                     frame_delay=args.walk_frame_delay)
+                                     frame_delay=args.walk_frame_delay,
+                                     attitude_provider=lambda: autonomous_attitude(
+                                         command.direction
+                                     ))
                 next_swing = stance_tripod
     except KeyboardInterrupt:
         print("\nStopped by user.")

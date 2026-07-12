@@ -1321,6 +1321,7 @@ def walk_half_cycle(
     hip_swing_scale=1.0,
     interpolation_steps=None,
     frame_delay=None,
+    attitude_provider=None,
 ):
     if interpolation_steps is None:
         interpolation_steps = WALK_HALF_CYCLE_STEPS
@@ -1332,6 +1333,11 @@ def walk_half_cycle(
         raise ValueError("frame_delay cannot be negative")
 
     for step in range(interpolation_steps + 1):
+        active_attitude = (
+            attitude_provider()
+            if attitude_provider is not None
+            else attitude
+        )
         set_walk_frame(
             home_pose,
             swing_tripod,
@@ -1339,7 +1345,7 @@ def walk_half_cycle(
             step / interpolation_steps,
             direction=direction,
             steering=steering,
-            attitude=attitude,
+            attitude=active_attitude,
             hip_swing_scale=hip_swing_scale,
         )
         time.sleep(frame_delay)
