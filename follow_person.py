@@ -111,8 +111,8 @@ def get_args():
     parser.add_argument(
         "--turn-scale",
         type=float,
-        default=0.30,
-        help="Scale applied to autonomous in-place hip swing (default: 0.30).",
+        default=0.38,
+        help="Scale applied to autonomous in-place hip swing (default: 0.38).",
     )
     parser.add_argument(
         "--tracking-alpha",
@@ -215,9 +215,10 @@ def command_for_person(person, frame_size, args):
     usable_range = args.turn_in_place_error - args.center_deadzone
     steering = (abs(center_error) - args.center_deadzone) / usable_range
     steering = min(args.max_steering, steering * args.max_steering)
-    # The physical steering bias is opposite the camera's horizontal error on
-    # this robot. In-place turning has its own separately calibrated sign.
-    steering *= -1.0 if center_error > 0 else 1.0
+    # Walking steering follows controller_walk's left-stick x convention:
+    # positive steers physically right and negative steers physically left.
+    # In-place turning has its own separately calibrated direction mapping.
+    steering *= 1.0 if center_error > 0 else -1.0
     side = "right" if center_error > 0 else "left"
     return FollowCommand(4, steering, f"walk forward; steer {side}"), center_error, area_ratio
 
