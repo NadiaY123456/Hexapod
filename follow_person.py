@@ -81,14 +81,14 @@ def get_args():
     parser.add_argument(
         "--center-deadzone",
         type=float,
-        default=0.25,
-        help="Horizontal normalized error treated as centered (default: 0.25).",
+        default=0.15,
+        help="Horizontal normalized error treated as centered (default: 0.15).",
     )
     parser.add_argument(
         "--turn-in-place-error",
         type=float,
-        default=0.68,
-        help="Error above which the robot turns in place (default: 0.68).",
+        default=0.50,
+        help="Error above which the robot turns in place (default: 0.50).",
     )
     parser.add_argument(
         "--stop-area",
@@ -99,20 +99,20 @@ def get_args():
     parser.add_argument(
         "--close-turn-error",
         type=float,
-        default=0.52,
-        help="At close range, turn only beyond this horizontal error (default: 0.52).",
+        default=0.40,
+        help="At close range, turn only beyond this horizontal error (default: 0.40).",
     )
     parser.add_argument(
         "--max-steering",
         type=float,
-        default=0.25,
-        help="Maximum walking steering correction (default: 0.25).",
+        default=0.40,
+        help="Maximum walking steering correction (default: 0.40).",
     )
     parser.add_argument(
         "--turn-scale",
         type=float,
-        default=0.38,
-        help="Scale applied to autonomous in-place hip swing (default: 0.38).",
+        default=0.60,
+        help="Scale applied to autonomous in-place hip swing (default: 0.60).",
     )
     parser.add_argument(
         "--tracking-alpha",
