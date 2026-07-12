@@ -117,14 +117,32 @@ def get_args():
     parser.add_argument(
         "--tracking-alpha",
         type=float,
-        default=0.20,
-        help="Target smoothing factor; lower is calmer (default: 0.20).",
+        default=0.55,
+        help="Target smoothing factor; higher reacts faster (default: 0.55).",
     )
     parser.add_argument(
         "--lost-timeout",
         type=float,
-        default=0.6,
-        help="Stop after this many seconds without a person (default: 0.6).",
+        default=0.25,
+        help="Keep using the last detection for this many seconds (default: 0.25).",
+    )
+    parser.add_argument(
+        "--search-timeout",
+        type=float,
+        default=1.5,
+        help="Turn toward the last-seen motion after detection is lost (default: 1.5).",
+    )
+    parser.add_argument(
+        "--walk-steps",
+        type=int,
+        default=6,
+        help="Interpolation steps per autonomous half-cycle (default: 6).",
+    )
+    parser.add_argument(
+        "--walk-frame-delay",
+        type=float,
+        default=0.018,
+        help="Seconds between autonomous gait frames (default: 0.018).",
     )
     parser.add_argument(
         "--bbox-normalization", action=argparse.BooleanOptionalAction
@@ -147,6 +165,14 @@ def get_args():
         parser.error("turn-scale must be within 0..1")
     if not 0.0 < args.tracking_alpha <= 1.0:
         parser.error("tracking-alpha must be within 0..1")
+    if args.lost_timeout < 0.0:
+        parser.error("lost-timeout cannot be negative")
+    if args.search_timeout < args.lost_timeout:
+        parser.error("search-timeout must be at least lost-timeout")
+    if args.walk_steps < 1:
+        parser.error("walk-steps must be at least 1")
+    if args.walk_frame_delay < 0.0:
+        parser.error("walk-frame-delay cannot be negative")
     if args.print_interval < 0.0:
         parser.error("print-interval cannot be negative")
     return args
@@ -321,6 +347,9 @@ def main():
 
     home_pose = None
     last_seen = 0.0
+    last_raw_error = None
+    search_direction = 0
+    has_seen_target = False
     next_swing = walk.TRIPOD_A
     last_command = None
     print("Camera ready. Standing up; keep clear of the robot.")
@@ -346,12 +375,28 @@ def main():
                 detection_printer.print(detections, frame_size)
                 now = time.monotonic()
                 if current_target is not None:
+                    raw_error = (
+                        current_target.center[0] - frame_size[0] / 2
+                    ) / (frame_size[0] / 2)
+                    error_delta = (
+                        raw_error - last_raw_error
+                        if last_raw_error is not None
+                        else 0.0
+                    )
+                    if abs(error_delta) >= 0.04:
+                        search_direction = 1 if error_delta > 0.0 else -1
+                    elif abs(raw_error) >= 0.05:
+                        search_direction = 1 if raw_error > 0.0 else -1
+                    else:
+                        search_direction = 0
+                    last_raw_error = raw_error
                     target = smooth_detection(
                         target,
                         current_target,
                         args.tracking_alpha,
                     )
                     last_seen = now
+                    has_seen_target = True
                 elif now - last_seen > args.lost_timeout:
                     target = None
 
@@ -359,12 +404,27 @@ def main():
                     status_text = "PAUSED (Space to follow)"
                     continue
                 if target is None:
-                    status_text = "FOLLOWING: looking for person"
-                    walk.hold_standing_pose(home_pose)
-                    last_command = None
-                    continue
+                    if (
+                        has_seen_target
+                        and search_direction
+                        and now - last_seen <= args.search_timeout
+                    ):
+                        side = "right" if search_direction > 0 else "left"
+                        command = FollowCommand(
+                            3 if search_direction > 0 else -3,
+                            0.0,
+                            f"person lost; search {side}",
+                        )
+                        error = float(search_direction)
+                        area = 0.0
+                    else:
+                        status_text = "FOLLOWING: looking for person"
+                        walk.hold_standing_pose(home_pose)
+                        last_command = None
+                        continue
+                else:
+                    command, error, area = command_for_person(target, frame_size, args)
 
-                command, error, area = command_for_person(target, frame_size, args)
                 status_text = f"{command.description}  error={error:+.2f} area={area:.2f}"
                 command_key = (command.direction, round(command.steering, 2))
                 if command_key != last_command:
@@ -382,7 +442,9 @@ def main():
                                          args.turn_scale
                                          if abs(command.direction) == 3
                                          else 1.0
-                                     ))
+                                     ),
+                                     interpolation_steps=args.walk_steps,
+                                     frame_delay=args.walk_frame_delay)
                 next_swing = stance_tripod
     except KeyboardInterrupt:
         print("\nStopped by user.")
