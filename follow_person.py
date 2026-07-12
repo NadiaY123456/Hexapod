@@ -61,9 +61,16 @@ class KeyboardControls:
         return keys
 
 
-def get_args():
+def get_args(default_target_label="person"):
     parser = argparse.ArgumentParser(
-        description="Follow a detected person using the hexapod tripod gait."
+        description=(
+            f"Follow a detected {default_target_label} using the hexapod tripod gait."
+        )
+    )
+    parser.add_argument(
+        "--target-label",
+        default=default_target_label,
+        help=f"Detection label to follow (default: {default_target_label}).",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--labels", help="Optional labels file, one label per line.")
@@ -94,7 +101,7 @@ def get_args():
         "--stop-area",
         type=float,
         default=0.30,
-        help="Stop approaching when person box fills this frame fraction (default: 0.30).",
+        help="Stop approaching when target box fills this frame fraction (default: 0.30).",
     )
     parser.add_argument(
         "--close-turn-error",
@@ -186,13 +193,16 @@ def get_args():
     return args
 
 
-def choose_person(detections):
-    people = [item for item in detections if item.label.lower() == "person"]
-    if not people:
+def choose_target(detections, target_label):
+    matches = [
+        item for item in detections
+        if item.label.lower() == target_label.lower()
+    ]
+    if not matches:
         return None
-    # Prefer the largest visible person, then confidence, to avoid switching
+    # Prefer the largest visible target, then confidence, to avoid switching
     # between a nearby target and small background detections.
-    return max(people, key=lambda item: (item.box[2] * item.box[3], item.confidence))
+    return max(matches, key=lambda item: (item.box[2] * item.box[3], item.confidence))
 
 
 def smooth_detection(previous, current, alpha):
@@ -257,8 +267,12 @@ def command_for_person(person, frame_size, args):
     return FollowCommand(4, steering, f"walk forward; steer {side}"), center_error, area_ratio
 
 
-def main():
-    args = get_args()
+def main(default_target_label="person"):
+    args = get_args(default_target_label)
+    target_name = args.target_label.strip().lower()
+    if not target_name:
+        print("Target label cannot be empty.", file=sys.stderr)
+        return 2
     cv2, MappedArray, Picamera2, IMX500, NetworkIntrinsics, nanodet = (
         import_camera_stack()
     )
@@ -285,7 +299,7 @@ def main():
     detections = []
     target = None
     following = True
-    status_text = "FOLLOWING: looking for person"
+    status_text = f"FOLLOWING: looking for {target_name}"
     detection_printer = DetectionPrinter(args.print_interval, [])
 
     @lru_cache
@@ -342,7 +356,7 @@ def main():
             if target is not None:
                 x, y, box_w, box_h = target.box
                 cv2.rectangle(mapped.array, (x, y), (x + box_w, y + box_h), color, 3)
-                cv2.putText(mapped.array, f"person {target.confidence:.2f}",
+                cv2.putText(mapped.array, f"{target_name} {target.confidence:.2f}",
                             (x + 4, max(50, y + 22)), cv2.FONT_HERSHEY_SIMPLEX,
                             0.6, color, 2)
 
@@ -389,7 +403,10 @@ def main():
                         return 0
 
                 metadata = picam2.capture_metadata()
-                current_target = choose_person(parse_detections(metadata))
+                current_target = choose_target(
+                    parse_detections(metadata),
+                    target_name,
+                )
                 frame_size = picam2.camera_configuration()["main"]["size"]
                 detection_printer.print(detections, frame_size)
                 now = time.monotonic()
@@ -432,12 +449,12 @@ def main():
                         command = FollowCommand(
                             3 if search_direction > 0 else -3,
                             0.0,
-                            f"person lost; search {side}",
+                            f"{target_name} lost; search {side}",
                         )
                         error = float(search_direction)
                         area = 0.0
                     else:
-                        status_text = "FOLLOWING: looking for person"
+                        status_text = f"FOLLOWING: looking for {target_name}"
                         walk.hold_standing_pose(home_pose, autonomous_attitude())
                         last_command = None
                         continue
