@@ -10,6 +10,10 @@ DEFAULT_MODEL = (
     "/usr/share/imx500-models/"
     "imx500_network_ssd_mobilenetv2_fpnlite_320x320_pp.rpk"
 )
+AI_CAMERA_FOCAL_LENGTH_MM = 4.74
+AI_CAMERA_PIXEL_PITCH_UM = 1.55
+AI_CAMERA_SENSOR_WIDTH_PX = 4056
+DEFAULT_HUMAN_WIDTH_M = 0.45
 
 
 @dataclass
@@ -21,10 +25,53 @@ class Detection:
     center: tuple
 
 
+def focal_length_pixels(
+    frame_width_px,
+    focal_length_mm=AI_CAMERA_FOCAL_LENGTH_MM,
+    pixel_pitch_um=AI_CAMERA_PIXEL_PITCH_UM,
+    sensor_width_px=AI_CAMERA_SENSOR_WIDTH_PX,
+):
+    native_focal_px = focal_length_mm / (pixel_pitch_um / 1000.0)
+    return native_focal_px * frame_width_px / sensor_width_px
+
+
+def estimate_distance_m(
+    object_width_m,
+    box_width_px,
+    frame_width_px,
+    focal_length_mm=AI_CAMERA_FOCAL_LENGTH_MM,
+    pixel_pitch_um=AI_CAMERA_PIXEL_PITCH_UM,
+    sensor_width_px=AI_CAMERA_SENSOR_WIDTH_PX,
+):
+    if object_width_m <= 0.0 or box_width_px <= 0 or frame_width_px <= 0:
+        return None
+    focal_px = focal_length_pixels(
+        frame_width_px,
+        focal_length_mm,
+        pixel_pitch_um,
+        sensor_width_px,
+    )
+    return object_width_m * focal_px / box_width_px
+
+
 class DetectionPrinter:
-    def __init__(self, min_interval, target_labels):
+    def __init__(
+        self,
+        min_interval,
+        target_labels,
+        distance_target=None,
+        object_width_m=None,
+        focal_length_mm=AI_CAMERA_FOCAL_LENGTH_MM,
+        pixel_pitch_um=AI_CAMERA_PIXEL_PITCH_UM,
+        sensor_width_px=AI_CAMERA_SENSOR_WIDTH_PX,
+    ):
         self.min_interval = min_interval
         self.target_labels = {label.lower() for label in target_labels}
+        self.distance_target = distance_target.lower() if distance_target else None
+        self.object_width_m = object_width_m
+        self.focal_length_mm = focal_length_mm
+        self.pixel_pitch_um = pixel_pitch_um
+        self.sensor_width_px = sensor_width_px
         self.last_print_time = 0.0
 
     def should_print(self):
@@ -52,18 +99,44 @@ class DetectionPrinter:
         payload = []
         for detection in selected:
             center_x, center_y = detection.center
-            payload.append(
-                {
-                    "label": detection.label,
-                    "confidence": round(detection.confidence, 3),
-                    "box": [int(value) for value in detection.box],
-                    "center": [int(center_x), int(center_y)],
-                    "offset": [
-                        round((center_x - frame_w / 2) / (frame_w / 2), 3),
-                        round((center_y - frame_h / 2) / (frame_h / 2), 3),
-                    ],
-                }
-            )
+            box_width_px = int(detection.box[2])
+            item = {
+                "label": detection.label,
+                "confidence": round(detection.confidence, 3),
+                "box": [int(value) for value in detection.box],
+                "width_px": box_width_px,
+                "center": [int(center_x), int(center_y)],
+                "offset": [
+                    round((center_x - frame_w / 2) / (frame_w / 2), 3),
+                    round((center_y - frame_h / 2) / (frame_h / 2), 3),
+                ],
+            }
+            if (
+                self.distance_target == detection.label.lower()
+                and self.object_width_m is not None
+            ):
+                focal_px = focal_length_pixels(
+                    frame_w,
+                    self.focal_length_mm,
+                    self.pixel_pitch_um,
+                    self.sensor_width_px,
+                )
+                distance_m = estimate_distance_m(
+                    self.object_width_m,
+                    box_width_px,
+                    frame_w,
+                    self.focal_length_mm,
+                    self.pixel_pitch_um,
+                    self.sensor_width_px,
+                )
+                if distance_m is not None:
+                    item["distance"] = {
+                        "meters": round(distance_m, 2),
+                        "feet": round(distance_m * 3.28084, 2),
+                        "assumed_width_m": self.object_width_m,
+                        "focal_length_px": round(focal_px, 2),
+                    }
+            payload.append(item)
         print(json.dumps({"detections": payload}, separators=(",", ":")))
 
 
@@ -89,7 +162,11 @@ def import_camera_stack():
     return cv2, MappedArray, Picamera2, IMX500, NetworkIntrinsics, postprocess_nanodet_detection
 
 
-def get_args():
+def get_args(
+    default_targets=None,
+    default_distance_target=None,
+    default_object_width_m=None,
+):
     parser = argparse.ArgumentParser(
         description="Run Raspberry Pi AI Camera object detection and print JSON detections."
     )
@@ -110,8 +187,37 @@ def get_args():
     parser.add_argument(
         "--target",
         action="append",
-        default=[],
+        default=list(default_targets or []),
         help="Only print matching labels. Can be repeated, for example --target person.",
+    )
+    parser.add_argument(
+        "--distance-target",
+        default=default_distance_target,
+        help="Label whose bounding-box width should be used for distance estimation.",
+    )
+    parser.add_argument(
+        "--object-width-m",
+        type=float,
+        default=default_object_width_m,
+        help="Assumed real target width in metres.",
+    )
+    parser.add_argument(
+        "--focal-length-mm",
+        type=float,
+        default=AI_CAMERA_FOCAL_LENGTH_MM,
+        help="Camera focal length in millimetres (default: 4.74).",
+    )
+    parser.add_argument(
+        "--pixel-pitch-um",
+        type=float,
+        default=AI_CAMERA_PIXEL_PITCH_UM,
+        help="Sensor pixel pitch in micrometres (default: 1.55).",
+    )
+    parser.add_argument(
+        "--sensor-width-px",
+        type=int,
+        default=AI_CAMERA_SENSOR_WIDTH_PX,
+        help="Native horizontal sensor resolution (default: 4056).",
     )
     parser.add_argument(
         "--bbox-normalization",
@@ -134,7 +240,18 @@ def get_args():
         action=argparse.BooleanOptionalAction,
         help="Preserve input tensor aspect ratio.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.object_width_m is not None and args.object_width_m <= 0.0:
+        parser.error("object-width-m must be positive")
+    if args.distance_target and args.object_width_m is None:
+        parser.error("distance-target requires object-width-m")
+    if args.focal_length_mm <= 0.0:
+        parser.error("focal-length-mm must be positive")
+    if args.pixel_pitch_um <= 0.0:
+        parser.error("pixel-pitch-um must be positive")
+    if args.sensor_width_px <= 0:
+        parser.error("sensor-width-px must be positive")
+    return args
 
 
 def rectangle_to_box(rectangle):
@@ -156,8 +273,16 @@ def load_labels(path):
         return [line.strip() for line in label_file if line.strip()]
 
 
-def main():
-    args = get_args()
+def main(
+    default_targets=None,
+    default_distance_target=None,
+    default_object_width_m=None,
+):
+    args = get_args(
+        default_targets,
+        default_distance_target,
+        default_object_width_m,
+    )
     (
         cv2,
         MappedArray,
@@ -188,7 +313,15 @@ def main():
         controls={"FrameRate": frame_rate},
         buffer_count=12,
     )
-    printer = DetectionPrinter(args.print_interval, args.target)
+    printer = DetectionPrinter(
+        args.print_interval,
+        args.target,
+        distance_target=args.distance_target,
+        object_width_m=args.object_width_m,
+        focal_length_mm=args.focal_length_mm,
+        pixel_pitch_um=args.pixel_pitch_um,
+        sensor_width_px=args.sensor_width_px,
+    )
     detections = []
 
     @lru_cache
@@ -256,6 +389,21 @@ def main():
             for detection in detections:
                 x, y, w, h = detection.box
                 label = f"{detection.label} ({detection.confidence:.2f})"
+                if (
+                    args.distance_target
+                    and detection.label.lower() == args.distance_target.lower()
+                ):
+                    frame_width = mapped.array.shape[1]
+                    distance_m = estimate_distance_m(
+                        args.object_width_m,
+                        w,
+                        frame_width,
+                        args.focal_length_mm,
+                        args.pixel_pitch_um,
+                        args.sensor_width_px,
+                    )
+                    if distance_m is not None:
+                        label += f" {w}px {distance_m:.2f}m"
                 cv2.rectangle(mapped.array, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 cv2.putText(
                     mapped.array,

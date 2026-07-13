@@ -33,12 +33,40 @@ python ai_camera_object_detection.py --target person
 ```
 
 Each terminal update is JSON, including object label, confidence, bounding box,
-center point, and normalized center offset from the camera frame. The offset is
+bounding-box width in pixels, center point, and normalized center offset from the camera frame. The offset is
 useful later if you want the hexapod to turn toward an object:
 
 ```json
-{"detections":[{"label":"person","confidence":0.82,"box":[100,80,220,300],"center":[210,230],"offset":[-0.34,-0.12]}]}
+{"detections":[{"label":"person","confidence":0.82,"box":[100,80,220,300],"width_px":220,"center":[210,230],"offset":[-0.34,-0.12]}]}
 ```
+
+## Estimate human distance
+
+Run the human-specific entry point:
+
+```bash
+python3 human_distance.py
+```
+
+It uses the AI Camera's 4.74 mm focal length, 1.55 micrometre pixel pitch,
+and 4056-pixel sensor width from the
+[Raspberry Pi AI Camera product brief](https://datasheets.raspberrypi.com/camera/ai-camera-product-brief.pdf).
+The default assumed human width is 0.45 m:
+
+```text
+distance = assumed_width_m * focal_length_px / bounding_box_width_px
+```
+
+Override the assumed width after measuring the intended target person:
+
+```bash
+python3 human_distance.py --object-width-m 0.50
+```
+
+The estimate assumes the whole body width is visible and facing the camera.
+Side-on poses, loose clothing, raised arms, partial occlusion, and detector-box
+jitter can cause substantial error, so calibrate against known distances before
+using the result for robot motion.
 
 ## Model
 
