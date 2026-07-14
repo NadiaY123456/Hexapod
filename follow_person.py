@@ -1,7 +1,9 @@
 """Use the Raspberry Pi AI Camera to make the hexapod follow a person.
 
 Press Space in the terminal to pause/resume following. Press Q or Escape to
-quit. The camera preview stays active while following is paused.
+quit. The camera preview stays active while following is paused. If a moving
+person is briefly lost, the robot continues along the last measured image-
+motion vector for up to the configured search timeout.
 """
 
 import argparse
@@ -243,8 +245,11 @@ def get_args(default_target_label="person"):
     parser.add_argument(
         "--search-timeout",
         type=float,
-        default=1.0,
-        help="Turn toward the last-seen motion after detection is lost (default: 1.0).",
+        default=3.0,
+        help=(
+            "Continue following the last-seen motion vector after detection "
+            "is lost (default: 3.0 seconds)."
+        ),
     )
     parser.add_argument(
         "--walk-steps",
