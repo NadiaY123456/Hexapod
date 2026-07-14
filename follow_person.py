@@ -192,7 +192,16 @@ def get_args(default_target_label="person"):
         "--stop-area",
         type=float,
         default=0.30,
-        help="Stop approaching when target box fills this frame fraction (default: 0.30).",
+        help="Near edge of the comfortable distance band (default: 0.30).",
+    )
+    parser.add_argument(
+        "--back-away-area",
+        type=float,
+        default=0.38,
+        help=(
+            "Walk backward when the target box fills at least this frame "
+            "fraction (default: 0.38)."
+        ),
     )
     parser.add_argument(
         "--close-turn-error",
@@ -280,8 +289,8 @@ def get_args(default_target_label="person"):
     args = parser.parse_args()
     if not 0.0 < args.center_deadzone < args.turn_in_place_error <= 1.0:
         parser.error("deadzone must be below turn-in-place-error, both within 0..1")
-    if not 0.0 < args.stop_area < 1.0:
-        parser.error("stop-area must be within 0..1")
+    if not 0.0 < args.stop_area < args.back_away_area < 1.0:
+        parser.error("stop-area must be below back-away-area, both within 0..1")
     if not args.center_deadzone < args.close_turn_error <= 1.0:
         parser.error("close-turn-error must exceed center-deadzone and be at most 1")
     if not 0.0 <= args.max_steering <= 1.0:
@@ -349,9 +358,18 @@ def command_for_person(person, frame_size, args):
     center_error = (person.center[0] - frame_w / 2) / (frame_w / 2)
     area_ratio = (person.box[2] * person.box[3]) / (frame_w * frame_h)
 
-    # Stop approaching at close range. Keep a wide stationary zone to reject
-    # box jitter, but allow a gentle in-place correction for a person who is
-    # clearly far to one side.
+    # If the person moves inside the comfortable distance band, back away
+    # until their box shrinks below this threshold. The gap between
+    # stop_area and back_away_area prevents forward/backward gait chatter.
+    if area_ratio >= args.back_away_area:
+        return (
+            FollowCommand(-1, 0.0, "too close; walk straight backward"),
+            center_error,
+            area_ratio,
+        )
+
+    # Hold within the comfortable distance band. Allow an in-place correction
+    # only if the person is clearly far to one side.
     if area_ratio >= args.stop_area:
         if abs(center_error) >= args.close_turn_error:
             direction = 3 if center_error > 0 else -3
@@ -586,9 +604,18 @@ def main(default_target_label="person"):
                         if target_age is not None and target_age <= args.lost_timeout
                         else "target lost"
                     )
-                    command.description = (
-                        f"{prediction_state}; predict motion; {command.description}"
-                    )
+                    if command.direction in (-1, -4):
+                        # Never reverse toward unseen terrain using only a stale
+                        # close-range box. Wait for a real detection instead.
+                        command = FollowCommand(
+                            0,
+                            0.0,
+                            f"{prediction_state}; too-close detection lost; hold still",
+                        )
+                    else:
+                        command.description = (
+                            f"{prediction_state}; predict motion; {command.description}"
+                        )
 
                 status_text = (
                     f"{command.description}  error={error:+.2f} area={area:.2f} "
