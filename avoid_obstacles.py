@@ -2,8 +2,9 @@
 
 The robot stands up when the program starts, but does not walk until W is
 pressed. W starts/resumes forward walking, S stops all walking while holding
-the standing pose, and P disengages the servos while camera monitoring
-continues. Ctrl+C exits the whole program.
+the standing pose, P disengages the servos, and O stands up again without
+walking. Camera monitoring continues throughout. Ctrl+C exits the whole
+program.
 
 Distance is estimated from bounding-box width, as in human_distance.py. Since
 different objects have different real widths, --object-width-m should be tuned
@@ -355,7 +356,7 @@ def main():
         stand_robot()
         motion = "standing"
         print("Camera ready. Robot is standing still and waiting for W.")
-        print("W=start/resume, S=stop walking, P=disengage, Ctrl+C=quit.")
+        print("W=start/resume, S=stop, P=disengage, O=stand only, Ctrl+C=quit.")
         with KeyboardControls() as keyboard:
             while True:
                 keys = keyboard.read_keys()
@@ -380,6 +381,14 @@ def main():
                     if home_pose is not None:
                         walk.hold_standing_pose(home_pose, autonomous_attitude())
                     print("S pressed: walking stopped.")
+                elif b"o" in keys:
+                    walking_enabled = False
+                    avoiding = False
+                    clear_frames = 0
+                    stand_robot()
+                    walk.hold_standing_pose(home_pose, autonomous_attitude())
+                    motion = "standing"
+                    print("O pressed: standing still; walking remains disabled.")
                 elif b"w" in keys:
                     stand_robot()
                     walking_enabled = True
