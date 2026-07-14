@@ -68,15 +68,16 @@ DIRECTIONS = {
     "leg6": {"foot": 1, "knee": 1},
 }
 
-# Per-leg calibration trims. The foot values come from the screenshot and are
-# relative to leg1's 21.5 degree reference:
+# Per-leg calibration trims. The foot values started from the screenshot and
+# are relative to leg1's 21.5 degree reference. Legs 2-5 include an additional
+# 3 degree outward correction so their foot joints do not remain tucked in.
 #   leg1=21.5, leg2=24.5, leg3=19.5, leg4=21.5, leg5=30.0, leg6=23.5
 TRIMS = {
     "leg1": {"foot": 8.0, "knee": -4.0},
-    "leg2": {"foot": 11.0, "knee": -4.0},
-    "leg3": {"foot": 8.0, "knee": 1.0},
-    "leg4": {"foot": 8.0, "knee": -7.0},
-    "leg5": {"foot": 8.5, "knee": -7.0},
+    "leg2": {"foot": 14.0, "knee": -4.0},
+    "leg3": {"foot": 11.0, "knee": 1.0},
+    "leg4": {"foot": 11.0, "knee": -7.0},
+    "leg5": {"foot": 11.5, "knee": -7.0},
     "leg6": {"foot": 8.0, "knee": -8.0},
 }
 
@@ -219,6 +220,8 @@ STANCE_HIP_SCALE = {
 WALK_HALF_CYCLE_STEPS = 8
 WALK_FRAME_DELAY = 0.025
 WALK_SETTLE_DELAY = 0.04
+WALK_STANCE_LEVEL_BOOST = 1.30
+WALK_SWING_LEVEL_MIN_SCALE = 0.20
 ANALOG_WALK_MIN_SPEED_SCALE = 0.35
 ANALOG_WALK_MAX_SPEED_SCALE = 1.35
 
@@ -247,9 +250,9 @@ LEVEL_PITCH_SIGN = -1.0
 LEVEL_MAX_ATTITUDE = 0.90
 LEVEL_FILTER_ALPHA = 0.55
 LEVEL_SAMPLE_INTERVAL = 0.05
-LEVEL_MOVING_ROLL_SCALE = 1.0
-LEVEL_MOVING_PITCH_SCALE = 1.0
-LEVEL_FORWARD_PITCH_SCALE = 1.0
+LEVEL_MOVING_ROLL_SCALE = 1.10
+LEVEL_MOVING_PITCH_SCALE = 1.10
+LEVEL_FORWARD_PITCH_SCALE = 1.20
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
 MPU_READ_RETRY_DELAY = 0.008
@@ -1239,6 +1242,25 @@ def body_attitude_offsets(leg_name, attitude):
     return foot, knee
 
 
+def centered_attitude_offsets(leg_names, attitude, center_amount=1.0):
+    offsets = {
+        leg_name: body_attitude_offsets(leg_name, attitude)
+        for leg_name in leg_names
+    }
+    count = len(offsets)
+    if count == 0:
+        return offsets
+    mean_foot = sum(offset[0] for offset in offsets.values()) / count
+    mean_knee = sum(offset[1] for offset in offsets.values()) / count
+    return {
+        leg_name: (
+            foot - mean_foot * center_amount,
+            knee - mean_knee * center_amount,
+        )
+        for leg_name, (foot, knee) in offsets.items()
+    }
+
+
 def set_walk_frame(
     home_pose,
     swing_tripod,
@@ -1266,10 +1288,28 @@ def set_walk_frame(
     swing_hip = -hip_swing + (2 * hip_swing * eased_t)
     stance_hip = hip_swing - (2 * hip_swing * eased_t)
 
+    # At touchdown both tripods return to full correction for a smooth handoff.
+    # Near mid-step, the airborne tripod fades its correction while the
+    # grounded tripod takes more authority over body roll and pitch.
+    swing_attitude_scale = 1.0 - lift * (1.0 - WALK_SWING_LEVEL_MIN_SCALE)
+    stance_attitude_scale = 1.0 + lift * (WALK_STANCE_LEVEL_BOOST - 1.0)
+    swing_attitude_offsets = centered_attitude_offsets(
+        swing_tripod,
+        attitude,
+        center_amount=lift,
+    )
+    stance_attitude_offsets = centered_attitude_offsets(
+        stance_tripod,
+        attitude,
+        center_amount=lift,
+    )
+
     for leg_name in swing_tripod:
         hip_scale = hip_motion_scale(leg_name, direction, steering)
         leg_lift = lift * WALK_LIFT_SCALE[leg_name]
-        attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
+        attitude_foot, attitude_knee = swing_attitude_offsets[leg_name]
+        attitude_foot *= swing_attitude_scale
+        attitude_knee *= swing_attitude_scale
         swing_foot = home_pose[0] + attitude_foot + WALK_LIFT_FOOT_DELTA * leg_lift
         swing_knee = home_pose[1] + attitude_knee + WALK_LIFT_KNEE_DELTA * leg_lift
         set_leg_offsets(leg_name, swing_foot, swing_knee)
@@ -1280,7 +1320,9 @@ def set_walk_frame(
 
     for leg_name in stance_tripod:
         hip_scale = hip_motion_scale(leg_name, direction, steering)
-        attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
+        attitude_foot, attitude_knee = stance_attitude_offsets[leg_name]
+        attitude_foot *= stance_attitude_scale
+        attitude_knee *= stance_attitude_scale
         set_leg_offsets(
             leg_name,
             home_pose[0] + attitude_foot,
