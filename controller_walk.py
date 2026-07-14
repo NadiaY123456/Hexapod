@@ -70,15 +70,15 @@ DIRECTIONS = {
 
 # Per-leg calibration trims. The foot values started from the screenshot and
 # are relative to leg1's 21.5 degree reference. Legs 2-5 include an additional
-# 3 degree outward correction; legs 1 and 6 are moved 3 degrees inward.
+# 3 degree outward correction so their foot joints do not remain tucked in.
 #   leg1=21.5, leg2=24.5, leg3=19.5, leg4=21.5, leg5=30.0, leg6=23.5
 TRIMS = {
-    "leg1": {"foot": 5.0, "knee": -4.0},
+    "leg1": {"foot": 8.0, "knee": -4.0},
     "leg2": {"foot": 14.0, "knee": -4.0},
     "leg3": {"foot": 11.0, "knee": 1.0},
     "leg4": {"foot": 11.0, "knee": -7.0},
     "leg5": {"foot": 11.5, "knee": -7.0},
-    "leg6": {"foot": 5.0, "knee": -8.0},
+    "leg6": {"foot": 8.0, "knee": -8.0},
 }
 
 # Hip/body yaw calibration for walking. Legs 1-3 and 4-6 are assumed to be on
@@ -220,8 +220,8 @@ STANCE_HIP_SCALE = {
 WALK_HALF_CYCLE_STEPS = 8
 WALK_FRAME_DELAY = 0.025
 WALK_SETTLE_DELAY = 0.04
-WALK_STANCE_LEVEL_BOOST = 1.45
-WALK_SWING_LEVEL_MIN_SCALE = 0.15
+WALK_STANCE_LEVEL_BOOST = 1.30
+WALK_SWING_LEVEL_MIN_SCALE = 0.20
 ANALOG_WALK_MIN_SPEED_SCALE = 0.35
 ANALOG_WALK_MAX_SPEED_SCALE = 1.35
 
@@ -243,18 +243,16 @@ BODY_PITCH_FOOT_DEG = 22.0
 BODY_PITCH_KNEE_DEG = -16.0
 MPU6050_ADDRESS = 0x68
 LEVELING_ENABLED = True
-LEVEL_ROLL_GAIN = 0.05
-LEVEL_PITCH_GAIN = 0.055
-LEVEL_ROLL_RATE_GAIN = 0.006
-LEVEL_PITCH_RATE_GAIN = 0.009
+LEVEL_ROLL_GAIN = 0.04
+LEVEL_PITCH_GAIN = 0.04
 LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
-LEVEL_MAX_ATTITUDE = 0.95
-LEVEL_FILTER_ALPHA = 0.45
+LEVEL_MAX_ATTITUDE = 0.90
+LEVEL_FILTER_ALPHA = 0.55
 LEVEL_SAMPLE_INTERVAL = 0.05
-LEVEL_MOVING_ROLL_SCALE = 1.15
-LEVEL_MOVING_PITCH_SCALE = 1.15
-LEVEL_FORWARD_PITCH_SCALE = 1.35
+LEVEL_MOVING_ROLL_SCALE = 1.10
+LEVEL_MOVING_PITCH_SCALE = 1.10
+LEVEL_FORWARD_PITCH_SCALE = 1.20
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
 MPU_READ_RETRY_DELAY = 0.008
@@ -807,8 +805,6 @@ class LevelingController:
         self.roll_degrees = 0.0
         self.pitch_degrees = 0.0
         self.yaw_degrees = 0.0
-        self.roll_rate_degrees = 0.0
-        self.pitch_rate_degrees = 0.0
         self.gyro_bias = (0.0, 0.0, 0.0)
         self.read_errors = 0
         self.last_sample_time = 0.0
@@ -933,15 +929,10 @@ class LevelingController:
         self.read_errors = 0
         dt = max(0.001, min(0.25, now - previous_sample_time))
         self.last_sample_time = now
-        corrected_gyro_x = gyro_x - self.gyro_bias[0]
-        corrected_gyro_y = gyro_y - self.gyro_bias[1]
-        corrected_gyro_z = gyro_z - self.gyro_bias[2]
-        self.roll_rate_degrees = math.degrees(corrected_gyro_x)
-        self.pitch_rate_degrees = math.degrees(corrected_gyro_y)
         self.filter.update(
-            corrected_gyro_x,
-            corrected_gyro_y,
-            corrected_gyro_z,
+            gyro_x - self.gyro_bias[0],
+            gyro_y - self.gyro_bias[1],
+            gyro_z - self.gyro_bias[2],
             accel_x,
             accel_y,
             accel_z,
@@ -955,22 +946,14 @@ class LevelingController:
             -LEVEL_MAX_ATTITUDE,
             min(
                 LEVEL_MAX_ATTITUDE,
-                LEVEL_ROLL_SIGN
-                * (
-                    self.roll_degrees * LEVEL_ROLL_GAIN
-                    + self.roll_rate_degrees * LEVEL_ROLL_RATE_GAIN
-                ),
+                LEVEL_ROLL_SIGN * self.roll_degrees * LEVEL_ROLL_GAIN,
             ),
         )
         target_pitch = max(
             -LEVEL_MAX_ATTITUDE,
             min(
                 LEVEL_MAX_ATTITUDE,
-                LEVEL_PITCH_SIGN
-                * (
-                    self.pitch_degrees * LEVEL_PITCH_GAIN
-                    + self.pitch_rate_degrees * LEVEL_PITCH_RATE_GAIN
-                ),
+                LEVEL_PITCH_SIGN * self.pitch_degrees * LEVEL_PITCH_GAIN,
             ),
         )
 
@@ -1001,8 +984,6 @@ class LevelingController:
             f"{label} -> "
             f"roll {self.roll_degrees:.1f} deg, "
             f"pitch {self.pitch_degrees:.1f} deg, "
-            f"rates ({self.roll_rate_degrees:.1f}, "
-            f"{self.pitch_rate_degrees:.1f}) deg/s, "
             f"yaw {self.yaw_degrees:.1f} deg, "
             f"correction roll {self.roll:.2f}, "
             f"pitch {self.pitch:.2f}"
