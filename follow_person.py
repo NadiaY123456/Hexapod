@@ -5,6 +5,7 @@ quit. The camera preview stays active while following is paused.
 """
 
 import argparse
+import math
 import os
 import select
 import sys
@@ -30,6 +31,94 @@ class FollowCommand:
     direction: int
     steering: float
     description: str
+
+
+class TargetMotionTracker:
+    """Filter target motion and extrapolate through short detection dropouts."""
+
+    def __init__(self, position_alpha, velocity_alpha, velocity_deadzone, max_speed):
+        self.position_alpha = position_alpha
+        self.velocity_alpha = velocity_alpha
+        self.velocity_deadzone = velocity_deadzone
+        self.max_speed = max_speed
+        self.detection = None
+        self.velocity = (0.0, 0.0)
+        self.last_raw_center = None
+        self.last_update = None
+        self.last_seen = None
+
+    def update(self, current, frame_size, now):
+        frame_w, frame_h = frame_size
+        if self.last_raw_center is not None and self.last_update is not None:
+            dt = max(0.001, now - self.last_update)
+            instant_velocity = (
+                (current.center[0] - self.last_raw_center[0]) / (frame_w / 2) / dt,
+                (current.center[1] - self.last_raw_center[1]) / (frame_h / 2) / dt,
+            )
+            speed = math.hypot(*instant_velocity)
+            if speed > self.max_speed:
+                scale = self.max_speed / speed
+                instant_velocity = (
+                    instant_velocity[0] * scale,
+                    instant_velocity[1] * scale,
+                )
+            if speed < self.velocity_deadzone:
+                instant_velocity = (0.0, 0.0)
+            self.velocity = tuple(
+                old + self.velocity_alpha * (new - old)
+                for old, new in zip(self.velocity, instant_velocity)
+            )
+            if math.hypot(*self.velocity) < self.velocity_deadzone:
+                self.velocity = (0.0, 0.0)
+
+        self.detection = smooth_detection(
+            self.detection,
+            current,
+            self.position_alpha,
+        )
+        self.last_raw_center = current.center
+        self.last_update = now
+        self.last_seen = now
+        return self.detection
+
+    def age(self, now):
+        return None if self.last_seen is None else max(0.0, now - self.last_seen)
+
+    def is_moving(self):
+        return math.hypot(*self.velocity) >= self.velocity_deadzone
+
+    def reset(self):
+        self.detection = None
+        self.velocity = (0.0, 0.0)
+        self.last_raw_center = None
+        self.last_update = None
+        self.last_seen = None
+
+    def predict(self, frame_size, now):
+        if self.detection is None or self.last_seen is None:
+            return None
+
+        frame_w, frame_h = frame_size
+        elapsed = max(0.0, now - self.last_seen)
+        shift_x = self.velocity[0] * elapsed * (frame_w / 2)
+        shift_y = self.velocity[1] * elapsed * (frame_h / 2)
+        center_x = max(-frame_w * 0.25, min(frame_w * 1.25,
+                                            self.detection.center[0] + shift_x))
+        center_y = max(-frame_h * 0.25, min(frame_h * 1.25,
+                                            self.detection.center[1] + shift_y))
+        box_x, box_y, box_w, box_h = self.detection.box
+        return Detection(
+            label=self.detection.label,
+            category=self.detection.category,
+            confidence=self.detection.confidence,
+            box=(
+                box_x + center_x - self.detection.center[0],
+                box_y + center_y - self.detection.center[1],
+                box_w,
+                box_h,
+            ),
+            center=(center_x, center_y),
+        )
 
 
 class KeyboardControls:
@@ -128,10 +217,28 @@ def get_args(default_target_label="person"):
         help="Target smoothing factor; higher reacts faster (default: 0.40).",
     )
     parser.add_argument(
+        "--velocity-alpha",
+        type=float,
+        default=0.45,
+        help="Target velocity smoothing factor (default: 0.45).",
+    )
+    parser.add_argument(
+        "--velocity-deadzone",
+        type=float,
+        default=0.08,
+        help="Ignore slower normalized image motion as detector jitter (default: 0.08).",
+    )
+    parser.add_argument(
+        "--max-target-speed",
+        type=float,
+        default=3.0,
+        help="Maximum normalized image velocity used for prediction (default: 3.0).",
+    )
+    parser.add_argument(
         "--lost-timeout",
         type=float,
         default=0.25,
-        help="Keep using the last detection for this many seconds (default: 0.25).",
+        help="Time before a predicted dropout is reported as lost (default: 0.25).",
     )
     parser.add_argument(
         "--search-timeout",
@@ -178,6 +285,12 @@ def get_args(default_target_label="person"):
         parser.error("turn-scale must be within 0..1")
     if not 0.0 < args.tracking_alpha <= 1.0:
         parser.error("tracking-alpha must be within 0..1")
+    if not 0.0 < args.velocity_alpha <= 1.0:
+        parser.error("velocity-alpha must be within 0..1")
+    if args.velocity_deadzone < 0.0:
+        parser.error("velocity-deadzone cannot be negative")
+    if args.max_target_speed <= 0.0:
+        parser.error("max-target-speed must be positive")
     if args.lost_timeout < 0.0:
         parser.error("lost-timeout cannot be negative")
     if args.search_timeout < args.lost_timeout:
@@ -298,9 +411,16 @@ def main(default_target_label="person"):
     )
     detections = []
     target = None
+    target_is_predicted = False
     following = True
     status_text = f"FOLLOWING: looking for {target_name}"
     detection_printer = DetectionPrinter(args.print_interval, [])
+    motion_tracker = TargetMotionTracker(
+        args.tracking_alpha,
+        args.velocity_alpha,
+        args.velocity_deadzone,
+        args.max_target_speed,
+    )
 
     @lru_cache
     def model_labels():
@@ -354,11 +474,26 @@ def main(default_target_label="person"):
             cv2.putText(mapped.array, status_text, (12, 28),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
             if target is not None:
-                x, y, box_w, box_h = target.box
+                x, y, box_w, box_h = (
+                    int(round(value)) for value in target.box
+                )
                 cv2.rectangle(mapped.array, (x, y), (x + box_w, y + box_h), color, 3)
                 cv2.putText(mapped.array, f"{target_name} {target.confidence:.2f}",
                             (x + 4, max(50, y + 22)), cv2.FONT_HERSHEY_SIMPLEX,
                             0.6, color, 2)
+                velocity_x, velocity_y = motion_tracker.velocity
+                vector_end = (
+                    int(target.center[0] + velocity_x * width * 0.18),
+                    int(target.center[1] + velocity_y * height * 0.18),
+                )
+                cv2.arrowedLine(
+                    mapped.array,
+                    (int(target.center[0]), int(target.center[1])),
+                    vector_end,
+                    (255, 255, 0) if target_is_predicted else color,
+                    2,
+                    tipLength=0.25,
+                )
 
     imx500.show_network_fw_progress_bar()
     picam2.start(config, show_preview=not args.headless)
@@ -369,10 +504,6 @@ def main(default_target_label="person"):
 
     home_pose = None
     leveler = None
-    last_seen = 0.0
-    last_raw_error = None
-    search_direction = 0
-    has_seen_target = False
     next_swing = walk.TRIPOD_A
     last_command = None
     print("Camera ready. Standing up; keep clear of the robot.")
@@ -411,58 +542,60 @@ def main(default_target_label="person"):
                 detection_printer.print(detections, frame_size)
                 now = time.monotonic()
                 if current_target is not None:
-                    raw_error = (
-                        current_target.center[0] - frame_size[0] / 2
-                    ) / (frame_size[0] / 2)
-                    error_delta = (
-                        raw_error - last_raw_error
-                        if last_raw_error is not None
-                        else 0.0
-                    )
-                    if abs(error_delta) >= 0.04:
-                        search_direction = 1 if error_delta > 0.0 else -1
-                    elif abs(raw_error) >= 0.05:
-                        search_direction = 1 if raw_error > 0.0 else -1
-                    else:
-                        search_direction = 0
-                    last_raw_error = raw_error
-                    target = smooth_detection(
-                        target,
+                    target = motion_tracker.update(
                         current_target,
-                        args.tracking_alpha,
+                        frame_size,
+                        now,
                     )
-                    last_seen = now
-                    has_seen_target = True
-                elif now - last_seen > args.lost_timeout:
-                    target = None
+                    target_is_predicted = False
+                else:
+                    target_age = motion_tracker.age(now)
+                    prediction_timeout = (
+                        args.search_timeout
+                        if motion_tracker.is_moving()
+                        else args.lost_timeout
+                    )
+                    if target_age is not None and target_age <= prediction_timeout:
+                        target = motion_tracker.predict(frame_size, now)
+                        target_is_predicted = target is not None
+                    else:
+                        target = None
+                        target_is_predicted = False
+                        motion_tracker.reset()
 
                 if not following:
                     status_text = "PAUSED (Space to follow)"
                     continue
                 if target is None:
-                    if (
-                        has_seen_target
-                        and search_direction
-                        and now - last_seen <= args.search_timeout
-                    ):
-                        side = "right" if search_direction > 0 else "left"
-                        command = FollowCommand(
-                            3 if search_direction > 0 else -3,
-                            0.0,
-                            f"{target_name} lost; search {side}",
-                        )
-                        error = float(search_direction)
-                        area = 0.0
-                    else:
-                        status_text = f"FOLLOWING: looking for {target_name}"
-                        walk.hold_standing_pose(home_pose, autonomous_attitude())
-                        last_command = None
-                        continue
-                else:
-                    command, error, area = command_for_person(target, frame_size, args)
+                    status_text = f"FOLLOWING: looking for {target_name}"
+                    walk.hold_standing_pose(home_pose, autonomous_attitude())
+                    last_command = None
+                    continue
 
-                status_text = f"{command.description}  error={error:+.2f} area={area:.2f}"
-                command_key = (command.direction, round(command.steering, 2))
+                command, error, area = command_for_person(target, frame_size, args)
+                velocity_x, velocity_y = motion_tracker.velocity
+                if target_is_predicted:
+                    target_age = motion_tracker.age(now)
+                    prediction_state = (
+                        "detection gap"
+                        if target_age is not None and target_age <= args.lost_timeout
+                        else "target lost"
+                    )
+                    command.description = (
+                        f"{prediction_state}; predict motion; {command.description}"
+                    )
+
+                status_text = (
+                    f"{command.description}  error={error:+.2f} area={area:.2f} "
+                    f"velocity=({velocity_x:+.2f},{velocity_y:+.2f})"
+                )
+                command_key = (
+                    command.direction,
+                    round(command.steering, 2),
+                    round(velocity_x, 1),
+                    round(velocity_y, 1),
+                    target_is_predicted,
+                )
                 if command_key != last_command:
                     print(status_text)
                     last_command = command_key
