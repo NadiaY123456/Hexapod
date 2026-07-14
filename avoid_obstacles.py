@@ -12,6 +12,7 @@ for the obstacles expected in the robot's environment.
 """
 
 import argparse
+import json
 import os
 import select
 import sys
@@ -47,7 +48,7 @@ class KeyboardControls:
             self.original_settings = termios.tcgetattr(self.fd)
             tty.setcbreak(self.fd)
         else:
-            print("Warning: stdin is not a terminal; W/S/P controls are disabled.")
+            print("Warning: stdin is not a terminal; W/S/P/O controls are disabled.")
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -64,30 +65,53 @@ class KeyboardControls:
 
 
 class ObstacleStatusPrinter:
-    """Print whether an obstacle is visible and its estimated distance."""
+    """Print every AI Camera detection and its estimated distance as JSON."""
 
     def __init__(self, interval):
         self.interval = interval
         self.last_print = 0.0
 
-    def print(self, obstacle, distance_m, blocking, motion):
+    def print(self, detections, frame_size, args, blocking, motion):
         now = time.monotonic()
         if now - self.last_print < self.interval:
             return
         self.last_print = now
-        if obstacle is None:
-            print(f"obstacle=no blocking=no distance=not_detected motion={motion}")
-            return
-        print(
-            f"obstacle=yes blocking={'yes' if blocking else 'no'} "
-            f"label={obstacle.label} distance={distance_m:.2f}m "
-            f"({distance_m * 3.28084:.2f}ft) motion={motion}"
-        )
+        frame_w, frame_h = frame_size
+        items = []
+        for detection in detections:
+            distance_m = obstacle_distance(detection, frame_w, args)
+            center_x, center_y = detection.center
+            item = {
+                "label": detection.label,
+                "confidence": round(detection.confidence, 3),
+                "box": [int(value) for value in detection.box],
+                "center": [int(center_x), int(center_y)],
+                "offset": [
+                    round((center_x - frame_w / 2) / (frame_w / 2), 3),
+                    round((center_y - frame_h / 2) / (frame_h / 2), 3),
+                ],
+                "nearby": distance_m is not None
+                and distance_m <= args.stop_distance_m,
+            }
+            if distance_m is not None:
+                item["distance"] = {
+                    "meters": round(distance_m, 2),
+                    "feet": round(distance_m * 3.28084, 2),
+                    "assumed_width_m": args.object_width_m,
+                }
+            items.append(item)
+        payload = {
+            "sees_anything": bool(items),
+            "nearby_obstacle": blocking,
+            "motion": motion,
+            "detections": items,
+        }
+        print(json.dumps(payload, separators=(",", ":")))
 
 
 def get_args():
     parser = argparse.ArgumentParser(
-        description="Walk forward and turn until close obstacles no longer block the path."
+        description="Walk forward and turn until no detected nearby object remains."
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--labels", help="Optional labels file, one label per line.")
@@ -96,12 +120,6 @@ def get_args():
     parser.add_argument("--max-detections", type=int, default=10)
     parser.add_argument("--fps", type=int, help="Override camera inference frame rate.")
     parser.add_argument("--headless", action="store_true")
-    parser.add_argument(
-        "--obstacle-label",
-        action="append",
-        default=[],
-        help="Only treat this label as an obstacle; repeat for several. Default: all labels.",
-    )
     parser.add_argument(
         "--object-width-m",
         type=float,
@@ -112,19 +130,7 @@ def get_args():
         "--stop-distance-m",
         type=float,
         default=0.75,
-        help="Begin avoiding a blocking obstacle at or below this distance (default: 0.75m).",
-    )
-    parser.add_argument(
-        "--corridor-width",
-        type=float,
-        default=0.50,
-        help="Central fraction of image treated as the walking corridor (default: 0.50).",
-    )
-    parser.add_argument(
-        "--min-obstacle-bottom",
-        type=float,
-        default=0.45,
-        help="Ignore boxes ending above this frame-height fraction (default: 0.45).",
+        help="Avoid any detected object at or below this distance (default: 0.75m).",
     )
     parser.add_argument(
         "--clear-frames",
@@ -154,10 +160,6 @@ def get_args():
 
     if args.object_width_m <= 0.0 or args.stop_distance_m <= 0.0:
         parser.error("object-width-m and stop-distance-m must be positive")
-    if not 0.0 < args.corridor_width <= 1.0:
-        parser.error("corridor-width must be within 0..1")
-    if not 0.0 <= args.min_obstacle_bottom <= 1.0:
-        parser.error("min-obstacle-bottom must be within 0..1")
     if args.clear_frames < 1 or args.walk_steps < 1:
         parser.error("clear-frames and walk-steps must be at least 1")
     if args.walk_frame_delay < 0.0 or args.print_interval < 0.0:
@@ -184,25 +186,10 @@ def obstacle_distance(detection, frame_width, args):
     )
 
 
-def box_overlaps_corridor(detection, frame_size, args):
-    frame_w, frame_h = frame_size
-    corridor_left = frame_w * (1.0 - args.corridor_width) / 2.0
-    corridor_right = frame_w - corridor_left
-    x, y, width, height = detection.box
-    return (
-        x + width >= corridor_left
-        and x <= corridor_right
-        and y + height >= frame_h * args.min_obstacle_bottom
-    )
-
-
 def select_obstacle(detections, frame_size, args):
-    """Return the nearest visible obstacle and whether it blocks the path."""
-    allowed = {label.lower() for label in args.obstacle_label}
+    """Return the nearest detection and whether any detection is nearby."""
     candidates = []
     for detection in detections:
-        if allowed and detection.label.lower() not in allowed:
-            continue
         distance_m = obstacle_distance(detection, frame_size[0], args)
         if distance_m is not None:
             candidates.append((distance_m, detection))
@@ -213,7 +200,6 @@ def select_obstacle(detections, frame_size, args):
         (distance, detection)
         for distance, detection in candidates
         if distance <= args.stop_distance_m
-        and box_overlaps_corridor(detection, frame_size, args)
     ]
     blocking = bool(blocking_candidates)
     distance_m, nearest = min(
@@ -249,8 +235,6 @@ def main():
         buffer_count=12,
     )
     detections = []
-    visible_obstacle = None
-    visible_distance = None
     blocking = False
     motion = "disengaged"
 
@@ -301,19 +285,22 @@ def main():
     def draw_overlay(request, stream="main"):
         with MappedArray(request, stream) as mapped:
             height, width = mapped.array.shape[:2]
-            corridor_left = int(width * (1.0 - args.corridor_width) / 2.0)
-            corridor_right = width - corridor_left
             color = (0, 0, 255) if blocking else (0, 255, 0)
-            cv2.line(mapped.array, (corridor_left, 0), (corridor_left, height), color, 1)
-            cv2.line(mapped.array, (corridor_right, 0), (corridor_right, height), color, 1)
             cv2.putText(mapped.array, motion, (12, 28), cv2.FONT_HERSHEY_SIMPLEX,
                         0.65, color, 2)
-            if visible_obstacle is not None:
-                x, y, box_w, box_h = visible_obstacle.box
-                cv2.rectangle(mapped.array, (x, y), (x + box_w, y + box_h), color, 3)
-                label = f"{visible_obstacle.label} {visible_distance:.2f}m"
+            for detection in detections:
+                x, y, box_w, box_h = detection.box
+                distance_m = obstacle_distance(detection, width, args)
+                nearby = distance_m is not None and distance_m <= args.stop_distance_m
+                box_color = (0, 0, 255) if nearby else (0, 255, 0)
+                cv2.rectangle(
+                    mapped.array, (x, y), (x + box_w, y + box_h), box_color, 3
+                )
+                label = detection.label
+                if distance_m is not None:
+                    label += f" {distance_m:.2f}m"
                 cv2.putText(mapped.array, label, (x + 4, max(50, y + 22)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
 
     imx500.show_network_fw_progress_bar()
     picam2.start(config, show_preview=not args.headless)
@@ -398,7 +385,7 @@ def main():
                 metadata = picam2.capture_metadata()
                 current = parse_detections(metadata)
                 frame_size = picam2.camera_configuration()["main"]["size"]
-                visible_obstacle, visible_distance, blocking_now = select_obstacle(
+                _, _, blocking_now = select_obstacle(
                     current, frame_size, args
                 )
 
@@ -419,9 +406,7 @@ def main():
                     motion = f"turning_{args.turn_direction}"
                 else:
                     motion = "walking_forward"
-                status_printer.print(
-                    visible_obstacle, visible_distance, blocking, motion
-                )
+                status_printer.print(current, frame_size, args, blocking, motion)
 
                 if not walking_enabled:
                     continue
