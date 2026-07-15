@@ -197,10 +197,19 @@ def get_args(default_target_label="person"):
     parser.add_argument(
         "--back-away-area",
         type=float,
-        default=0.38,
+        default=0.50,
         help=(
-            "Walk backward when the target box fills at least this frame "
-            "fraction (default: 0.38)."
+            "First close-range requirement: target box must fill at least "
+            "this frame fraction before reversing (default: 0.50)."
+        ),
+    )
+    parser.add_argument(
+        "--back-away-height",
+        type=float,
+        default=0.82,
+        help=(
+            "Second close-range requirement: target box must fill at least "
+            "this fraction of frame height before reversing (default: 0.82)."
         ),
     )
     parser.add_argument(
@@ -291,6 +300,8 @@ def get_args(default_target_label="person"):
         parser.error("deadzone must be below turn-in-place-error, both within 0..1")
     if not 0.0 < args.stop_area < args.back_away_area < 1.0:
         parser.error("stop-area must be below back-away-area, both within 0..1")
+    if not 0.0 < args.back_away_height <= 1.0:
+        parser.error("back-away-height must be within 0..1")
     if not args.center_deadzone < args.close_turn_error <= 1.0:
         parser.error("close-turn-error must exceed center-deadzone and be at most 1")
     if not 0.0 <= args.max_steering <= 1.0:
@@ -357,13 +368,36 @@ def command_for_person(person, frame_size, args):
     frame_w, frame_h = frame_size
     center_error = (person.center[0] - frame_w / 2) / (frame_w / 2)
     area_ratio = (person.box[2] * person.box[3]) / (frame_w * frame_h)
+    height_ratio = person.box[3] / frame_h
 
-    # If the person moves inside the comfortable distance band, back away
-    # until their box shrinks below this threshold. The gap between
-    # stop_area and back_away_area prevents forward/backward gait chatter.
-    if area_ratio >= args.back_away_area:
+    # Reverse only with strong, orientation-resistant evidence that the person
+    # is extremely close. Area alone changes when a person turns or walks
+    # sideways, while vertical image height mostly changes with distance.
+    # Requiring the person to be centered also prevents backing away in
+    # response to somebody simply crossing the camera's field of view.
+    too_close = (
+        area_ratio >= args.back_away_area
+        and height_ratio >= args.back_away_height
+    )
+    if too_close:
+        if abs(center_error) <= args.center_deadzone:
+            return (
+                FollowCommand(
+                    -1,
+                    0.0,
+                    f"very close (height={height_ratio:.2f}); walk straight backward",
+                ),
+                center_error,
+                area_ratio,
+            )
+        direction = 3 if center_error > 0 else -3
+        side = "right" if center_error > 0 else "left"
         return (
-            FollowCommand(-1, 0.0, "too close; walk straight backward"),
+            FollowCommand(
+                direction,
+                0.0,
+                f"very close but off center; turn {side} before backing",
+            ),
             center_error,
             area_ratio,
         )
