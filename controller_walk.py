@@ -78,7 +78,9 @@ TRIMS = {
     "leg3": {"foot": 8.0, "knee": 1.0},
     "leg4": {"foot": 8.0, "knee": -7.0},
     "leg5": {"foot": 8.5, "knee": -7.0},
-    "leg6": {"foot": 8.0, "knee": -8.0},
+    # Shifted 10 degrees inward from the previous 8 degree calibration to keep
+    # this joint away from its high-current outward position.
+    "leg6": {"foot": -2.0, "knee": -8.0},
 }
 
 # Hip/body yaw calibration for walking. Legs 1-3 and 4-6 are assumed to be on
@@ -166,16 +168,6 @@ WALK_LIFT_SCALE = {
     "leg4": 1.0,
     "leg5": 1.0,
     "leg6": 1.25,
-}
-# Negative foot offset tucks the joint inward. Keep this separate from the
-# standing calibration so leg 6 changes only while a gait is active.
-WALK_FOOT_TUCK_TRIM = {
-    "leg1": 0.0,
-    "leg2": 0.0,
-    "leg3": 0.0,
-    "leg4": 0.0,
-    "leg5": 0.0,
-    "leg6": -3.0,
 }
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
@@ -1297,12 +1289,7 @@ def set_walk_frame(
         hip_scale = hip_motion_scale(leg_name, direction, steering)
         leg_lift = lift * WALK_LIFT_SCALE[leg_name]
         attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
-        swing_foot = (
-            home_pose[0]
-            + WALK_FOOT_TUCK_TRIM[leg_name]
-            + attitude_foot
-            + WALK_LIFT_FOOT_DELTA * leg_lift
-        )
+        swing_foot = home_pose[0] + attitude_foot + WALK_LIFT_FOOT_DELTA * leg_lift
         swing_knee = (
             home_pose[1]
             + attitude_knee
@@ -1319,7 +1306,7 @@ def set_walk_frame(
         attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
         set_leg_offsets(
             leg_name,
-            home_pose[0] + WALK_FOOT_TUCK_TRIM[leg_name] + attitude_foot,
+            home_pose[0] + attitude_foot,
             home_pose[1] + attitude_knee,
         )
         set_leg_hip_offset(
@@ -1508,7 +1495,6 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         f"stance_scale={STANCE_HIP_SCALE}, "
         f"lift_foot={WALK_LIFT_FOOT_DELTA}, "
         f"lift_knee={WALK_LIFT_KNEE_DELTA}, "
-        f"walk_tuck={WALK_FOOT_TUCK_TRIM}, "
         f"steps={WALK_HALF_CYCLE_STEPS}, delay={WALK_FRAME_DELAY}"
     )
 
