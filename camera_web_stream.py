@@ -41,6 +41,7 @@ class StreamingOutput(io.BufferedIOBase):
         super().__init__()
         self.frame = None
         self.sequence = 0
+        self.stopped = False
         self.condition = threading.Condition()
 
     def writable(self):
@@ -53,6 +54,11 @@ class StreamingOutput(io.BufferedIOBase):
             self.sequence += 1
             self.condition.notify_all()
         return len(frame)
+
+    def stop(self):
+        with self.condition:
+            self.stopped = True
+            self.condition.notify_all()
 
 
 class StreamingHandler(server.BaseHTTPRequestHandler):
@@ -94,9 +100,11 @@ class StreamingHandler(server.BaseHTTPRequestHandler):
             while True:
                 with output.condition:
                     output.condition.wait_for(
-                        lambda: output.sequence != last_sequence,
+                        lambda: output.stopped or output.sequence != last_sequence,
                         timeout=10.0,
                     )
+                    if output.stopped:
+                        return
                     if output.sequence == last_sequence or output.frame is None:
                         continue
                     frame = output.frame
@@ -167,50 +175,130 @@ def import_camera_stack():
         from picamera2.encoders import MJPEGEncoder
         from picamera2.outputs import FileOutput
     except ImportError as error:
-        print(
+        raise RuntimeError(
             "Picamera2 is not installed. On Raspberry Pi OS run:\n"
             "  sudo apt update\n"
             "  sudo apt install python3-picamera2\n\n"
-            f"Original import error: {error}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+            f"Original import error: {error}"
+        ) from error
     return Transform, Picamera2, MJPEGEncoder, FileOutput
+
+
+class CameraWebStream:
+    """Own a Picamera2 MJPEG encoder and its background HTTP server."""
+
+    def __init__(
+        self,
+        host="0.0.0.0",
+        port=8000,
+        camera_index=0,
+        width=1280,
+        height=720,
+        fps=20.0,
+        hflip=False,
+        vflip=False,
+    ):
+        self.host = host
+        self.port = port
+        self.camera_index = camera_index
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.hflip = hflip
+        self.vflip = vflip
+        self.camera = None
+        self.output = None
+        self.httpd = None
+        self.server_thread = None
+        self.recording = False
+
+    @property
+    def url(self):
+        display_host = local_ip() if self.host == "0.0.0.0" else self.host
+        return f"http://{display_host}:{self.port}/"
+
+    def start(self):
+        if self.server_thread is not None:
+            return self.url
+
+        Transform, Picamera2, MJPEGEncoder, FileOutput = import_camera_stack()
+        try:
+            self.camera = Picamera2(self.camera_index)
+            transform = Transform(hflip=self.hflip, vflip=self.vflip)
+            configuration = self.camera.create_video_configuration(
+                main={"size": (self.width, self.height)},
+                controls={"FrameRate": self.fps},
+                transform=transform,
+                buffer_count=6,
+            )
+            self.camera.configure(configuration)
+
+            self.output = StreamingOutput()
+            self.httpd = StreamingServer(
+                (self.host, self.port),
+                StreamingHandler,
+            )
+            self.httpd.output = self.output
+            self.camera.start_recording(MJPEGEncoder(), FileOutput(self.output))
+            self.recording = True
+            self.server_thread = threading.Thread(
+                target=self.httpd.serve_forever,
+                name="camera-web-stream",
+                daemon=True,
+            )
+            self.server_thread.start()
+            return self.url
+        except Exception:
+            self.stop()
+            raise
+
+    def stop(self):
+        if self.recording and self.camera is not None:
+            self.camera.stop_recording()
+            self.recording = False
+
+        if self.output is not None:
+            self.output.stop()
+
+        if self.httpd is not None:
+            if self.server_thread is not None and self.server_thread.is_alive():
+                self.httpd.shutdown()
+                self.server_thread.join(timeout=3.0)
+            self.httpd.server_close()
+
+        if self.camera is not None:
+            self.camera.close()
+
+        self.server_thread = None
+        self.httpd = None
+        self.output = None
+        self.camera = None
 
 
 def main():
     args = parse_args()
-    Transform, Picamera2, MJPEGEncoder, FileOutput = import_camera_stack()
-
-    camera = Picamera2(args.camera)
-    transform = Transform(hflip=args.hflip, vflip=args.vflip)
-    configuration = camera.create_video_configuration(
-        main={"size": (args.width, args.height)},
-        controls={"FrameRate": args.fps},
-        transform=transform,
-        buffer_count=6,
+    stream = CameraWebStream(
+        host=args.host,
+        port=args.port,
+        camera_index=args.camera,
+        width=args.width,
+        height=args.height,
+        fps=args.fps,
+        hflip=args.hflip,
+        vflip=args.vflip,
     )
-    camera.configure(configuration)
-
-    output = StreamingOutput()
-    recording = False
     try:
-        camera.start_recording(MJPEGEncoder(), FileOutput(output))
-        recording = True
-
-        with StreamingServer((args.host, args.port), StreamingHandler) as httpd:
-            httpd.output = output
-            display_host = local_ip() if args.host == "0.0.0.0" else args.host
-            print(f"Camera stream: http://{display_host}:{args.port}/")
-            print("Press Ctrl+C to stop.")
-            try:
-                httpd.serve_forever()
-            except KeyboardInterrupt:
-                print("\nStopping camera stream.")
+        print(f"Camera stream: {stream.start()}")
+        print("Press Ctrl+C to stop.")
+        while True:
+            threading.Event().wait(3600)
+    except KeyboardInterrupt:
+        print("\nStopping camera stream.")
+    except Exception as error:
+        print(f"Unable to start camera stream: {error}", file=sys.stderr)
+        return 1
     finally:
-        if recording:
-            camera.stop_recording()
-        camera.close()
+        stream.stop()
 
     return 0
 

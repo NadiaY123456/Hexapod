@@ -5,6 +5,7 @@ import select
 import struct
 import time
 from adafruit_servokit import ServoKit
+from camera_web_stream import CameraWebStream
 
 try:
     import board
@@ -1726,7 +1727,40 @@ def parse_args():
         default=os.environ.get("CONTROLLER_DEVICE", DEFAULT_CONTROLLER_DEVICE),
         help=f"Linux joystick device path. Default: {DEFAULT_CONTROLLER_DEVICE}",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--no-camera-stream",
+        action="store_true",
+        help="Do not start the browser camera stream.",
+    )
+    parser.add_argument(
+        "--camera-host",
+        default="0.0.0.0",
+        help="Camera web-server listen address. Default: all interfaces.",
+    )
+    parser.add_argument(
+        "--camera-port",
+        type=int,
+        default=8000,
+        help="Camera web-server port. Default: 8000.",
+    )
+    parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--camera-width", type=int, default=1280)
+    parser.add_argument("--camera-height", type=int, default=720)
+    parser.add_argument("--camera-fps", type=float, default=20.0)
+    parser.add_argument("--camera-hflip", action="store_true")
+    parser.add_argument("--camera-vflip", action="store_true")
+    args = parser.parse_args()
+    if not 1 <= args.camera_port <= 65535:
+        parser.error("camera-port must be between 1 and 65535")
+    if args.camera_index < 0:
+        parser.error("camera-index must be zero or greater")
+    if args.camera_width <= 0 or args.camera_height <= 0:
+        parser.error("camera-width and camera-height must be positive")
+    if args.camera_width % 2 or args.camera_height % 2:
+        parser.error("camera-width and camera-height must be even numbers")
+    if not 1.0 <= args.camera_fps <= 60.0:
+        parser.error("camera-fps must be between 1 and 60")
+    return args
 
 
 def release_all():
@@ -1769,8 +1803,27 @@ def run_stand_up_sequence():
 def main():
     args = parse_args()
     validate_ik_constants()
+    camera_stream = None
 
     try:
+        if not args.no_camera_stream:
+            camera_stream = CameraWebStream(
+                host=args.camera_host,
+                port=args.camera_port,
+                camera_index=args.camera_index,
+                width=args.camera_width,
+                height=args.camera_height,
+                fps=args.camera_fps,
+                hflip=args.camera_hflip,
+                vflip=args.camera_vflip,
+            )
+            try:
+                print(f"Camera stream: {camera_stream.start()}")
+            except Exception as error:
+                print(f"Camera stream unavailable: {error}")
+                print("Continuing with controller walking without video.")
+                camera_stream = None
+
         walk_home_pose = run_stand_up_sequence()
 
         if CONTROLLER_WALK_AFTER_STAND:
@@ -1789,7 +1842,13 @@ def main():
     except KeyboardInterrupt:
         print("Stopped by user.")
     finally:
-        release_all()
+        try:
+            if camera_stream is not None:
+                camera_stream.stop()
+        except Exception as error:
+            print(f"Camera stream shutdown failed: {error}")
+        finally:
+            release_all()
 
 
 if __name__ == "__main__":

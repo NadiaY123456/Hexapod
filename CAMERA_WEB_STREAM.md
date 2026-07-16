@@ -19,6 +19,24 @@ Run the server from the repository:
 python3 camera_web_stream.py
 ```
 
+The stream is also enabled automatically when controller walking starts:
+
+```bash
+python3 controller_walk.py
+```
+
+To run controller walking without opening the camera, use:
+
+```bash
+python3 controller_walk.py --no-camera-stream
+```
+
+Controller stream settings use the `--camera-` prefix, for example:
+
+```bash
+python3 controller_walk.py --camera-port 8080 --camera-width 640 --camera-height 480
+```
+
 The terminal prints an address similar to:
 
 ```text
