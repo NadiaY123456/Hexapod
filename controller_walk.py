@@ -175,15 +175,15 @@ TURN_IN_PLACE_HIP_SWING_DEG = 24.0
 STEER_WHILE_WALKING_AMOUNT = 0.85
 BACKWARD_STEERING_TRIM = 0.12
 LATERAL_FORE_AFT_TRIM = 0.18
-# Right-veer correction by tripod group. Tripod A is legs 1, 3, 5; tripod B is
-# legs 2, 4, 6. If the veer gets worse, swap the A/B scale values.
+# Keep both tripods symmetric. Previous A/B stride scaling could amplify a
+# mechanical lean as support transferred from one tripod to the other.
 HIP_SWING_SCALE = {
-    "leg1": 0.98,
-    "leg2": 1.02,
-    "leg3": 0.98,
-    "leg4": 1.02,
-    "leg5": 0.98,
-    "leg6": 1.02,
+    "leg1": 1.0,
+    "leg2": 1.0,
+    "leg3": 1.0,
+    "leg4": 1.0,
+    "leg5": 1.0,
+    "leg6": 1.0,
 }
 BACKWARD_HIP_SWING_SCALE = {
     "leg1": 1.0,
@@ -248,9 +248,12 @@ LEVEL_PITCH_SIGN = -1.0
 LEVEL_MAX_ATTITUDE = 0.90
 LEVEL_FILTER_ALPHA = 0.55
 LEVEL_SAMPLE_INTERVAL = 0.05
-LEVEL_MOVING_ROLL_SCALE = 1.0
-LEVEL_MOVING_PITCH_SCALE = 1.0
-LEVEL_FORWARD_PITCH_SCALE = 1.0
+# Do not feed MPU attitude correction into tripod gait frames. Leveling remains
+# active while standing, but movement uses only the centered gait plus any
+# deliberate right-stick attitude command.
+LEVEL_MOVING_ROLL_SCALE = 0.0
+LEVEL_MOVING_PITCH_SCALE = 0.0
+LEVEL_FORWARD_PITCH_SCALE = 0.0
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
 MPU_READ_RETRY_DELAY = 0.008
