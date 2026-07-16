@@ -157,8 +157,8 @@ WALK_CYCLES = 8
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
 
-WALK_VERTICAL_LIFT_MM = 24.0
-WALK_VERTICAL_PHASE = 0.30
+WALK_LIFT_FOOT_DELTA = 44.0
+WALK_LIFT_KNEE_DELTA = -31.0
 WALK_LIFT_SCALE = {
     "leg1": 1.0,
     "leg2": 1.0,
@@ -227,8 +227,8 @@ STANCE_HIP_SCALE = {
     "leg5": 1.0,
     "leg6": 1.0,
 }
-WALK_HALF_CYCLE_STEPS = 12
-WALK_FRAME_DELAY = 0.018
+WALK_HALF_CYCLE_STEPS = 8
+WALK_FRAME_DELAY = 0.025
 WALK_SETTLE_DELAY = 0.04
 ANALOG_WALK_MIN_SPEED_SCALE = 0.35
 ANALOG_WALK_MAX_SPEED_SCALE = 1.35
@@ -336,10 +336,6 @@ def validate_ik_constants():
             "Fill in these IK constants before running stand_test_ik.py: "
             + ", ".join(missing)
         )
-    if WALK_VERTICAL_LIFT_MM <= 0.0:
-        raise ValueError("WALK_VERTICAL_LIFT_MM must be positive")
-    if not 0.0 < WALK_VERTICAL_PHASE < 0.5:
-        raise ValueError("WALK_VERTICAL_PHASE must be between 0 and 0.5")
 
 
 def clamp_angle(angle):
@@ -490,7 +486,7 @@ def clamp_reachable_target(x, z):
     return x, z
 
 
-def solve_leg_ik(x, z, previous_pose, preferred_foot_sign=None):
+def solve_leg_ik(x, z, previous_pose):
     x, z = clamp_reachable_target(x, z)
 
     reach_squared = x * x + z * z
@@ -502,13 +498,8 @@ def solve_leg_ik(x, z, previous_pose, preferred_foot_sign=None):
     base_angle = math.atan2(x, z)
     foot_magnitude = math.acos(cos_foot)
 
-    foot_angles = (
-        (math.copysign(foot_magnitude, preferred_foot_sign),)
-        if preferred_foot_sign is not None
-        else (foot_magnitude, -foot_magnitude)
-    )
     candidates = []
-    for foot_angle in foot_angles:
+    for foot_angle in (foot_magnitude, -foot_magnitude):
         knee_angle = base_angle - math.atan2(
             LOWER_LEG_LENGTH * math.sin(foot_angle),
             UPPER_LEG_LENGTH + LOWER_LEG_LENGTH * math.cos(foot_angle),
@@ -518,19 +509,6 @@ def solve_leg_ik(x, z, previous_pose, preferred_foot_sign=None):
         candidates.append((pose_error, pose))
 
     return min(candidates, key=lambda item: item[0])[1]
-
-
-def vertical_swing_pose(home_pose, lift_mm):
-    if lift_mm <= 0.001:
-        return list(home_pose)
-
-    home_x, home_z = foot_position_from_offsets(home_pose[0], home_pose[1])
-    return solve_leg_ik(
-        home_x,
-        home_z - lift_mm,
-        home_pose,
-        preferred_foot_sign=1.0,
-    )
 
 
 def ik_lift_from_contact(contact_pose, body_lift, steps=STAND_STEPS):
@@ -1288,23 +1266,6 @@ def body_attitude_offsets(leg_name, attitude):
     return foot, knee
 
 
-def smoothstep(value):
-    value = max(0.0, min(1.0, value))
-    return value * value * (3.0 - 2.0 * value)
-
-
-def swing_trajectory(t):
-    """Lift, sweep while clear, then lower instead of drawing a low arc."""
-    if t < WALK_VERTICAL_PHASE:
-        return smoothstep(t / WALK_VERTICAL_PHASE), 0.0
-    if t > 1.0 - WALK_VERTICAL_PHASE:
-        lower_t = (1.0 - t) / WALK_VERTICAL_PHASE
-        return smoothstep(lower_t), 1.0
-
-    sweep_t = (t - WALK_VERTICAL_PHASE) / (1.0 - 2.0 * WALK_VERTICAL_PHASE)
-    return 1.0, smoothstep(sweep_t)
-
-
 def set_walk_frame(
     home_pose,
     swing_tripod,
@@ -1318,7 +1279,8 @@ def set_walk_frame(
     if attitude is None:
         attitude = {"roll": 0.0, "pitch": 0.0}
 
-    lift, sweep_progress = swing_trajectory(t)
+    eased_t = t * t * (3 - 2 * t)
+    lift = math.sin(math.pi * t)
     if direction in (-2, 2):
         hip_swing = LATERAL_HIP_SWING_DEG
         if direction < 0:
@@ -1328,20 +1290,24 @@ def set_walk_frame(
     else:
         hip_swing = WALK_HIP_SWING_DEG
     hip_swing *= hip_swing_scale
-    swing_hip = -hip_swing + (2 * hip_swing * sweep_progress)
-    stance_hip = hip_swing - (2 * hip_swing * sweep_progress)
+    swing_hip = -hip_swing + (2 * hip_swing * eased_t)
+    stance_hip = hip_swing - (2 * hip_swing * eased_t)
 
     for leg_name in swing_tripod:
         hip_scale = hip_motion_scale(leg_name, direction, steering)
-        lift_mm = WALK_VERTICAL_LIFT_MM * lift * WALK_LIFT_SCALE[leg_name]
-        lift_pose = vertical_swing_pose(home_pose, lift_mm)
+        leg_lift = lift * WALK_LIFT_SCALE[leg_name]
         attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
         swing_foot = (
-            lift_pose[0]
+            home_pose[0]
             + WALK_FOOT_TUCK_TRIM[leg_name]
             + attitude_foot
+            + WALK_LIFT_FOOT_DELTA * leg_lift
         )
-        swing_knee = lift_pose[1] + attitude_knee
+        swing_knee = (
+            home_pose[1]
+            + attitude_knee
+            + WALK_LIFT_KNEE_DELTA * leg_lift
+        )
         set_leg_offsets(leg_name, swing_foot, swing_knee)
         set_leg_hip_offset(
             leg_name,
@@ -1540,8 +1506,8 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         f"lateral_scale={LATERAL_HIP_SWING_SCALE}, "
         f"rotate_scale={ROTATE_HIP_SWING_SCALE}, "
         f"stance_scale={STANCE_HIP_SCALE}, "
-        f"vertical_lift_mm={WALK_VERTICAL_LIFT_MM}, "
-        f"vertical_phase={WALK_VERTICAL_PHASE}, "
+        f"lift_foot={WALK_LIFT_FOOT_DELTA}, "
+        f"lift_knee={WALK_LIFT_KNEE_DELTA}, "
         f"walk_tuck={WALK_FOOT_TUCK_TRIM}, "
         f"steps={WALK_HALF_CYCLE_STEPS}, delay={WALK_FRAME_DELAY}"
     )
