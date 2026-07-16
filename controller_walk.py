@@ -157,8 +157,8 @@ WALK_CYCLES = 8
 TRIPOD_A = ("leg1", "leg3", "leg5")
 TRIPOD_B = ("leg2", "leg4", "leg6")
 
-WALK_LIFT_FOOT_DELTA = 44.0
-WALK_LIFT_KNEE_DELTA = -31.0
+WALK_VERTICAL_LIFT_MM = 24.0
+WALK_VERTICAL_PHASE = 0.30
 WALK_LIFT_SCALE = {
     "leg1": 1.0,
     "leg2": 1.0,
@@ -166,6 +166,16 @@ WALK_LIFT_SCALE = {
     "leg4": 1.0,
     "leg5": 1.0,
     "leg6": 1.25,
+}
+# Negative foot offset tucks the joint inward. Keep this separate from the
+# standing calibration so leg 6 changes only while a gait is active.
+WALK_FOOT_TUCK_TRIM = {
+    "leg1": 0.0,
+    "leg2": 0.0,
+    "leg3": 0.0,
+    "leg4": 0.0,
+    "leg5": 0.0,
+    "leg6": -3.0,
 }
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
@@ -217,8 +227,8 @@ STANCE_HIP_SCALE = {
     "leg5": 1.0,
     "leg6": 1.0,
 }
-WALK_HALF_CYCLE_STEPS = 8
-WALK_FRAME_DELAY = 0.025
+WALK_HALF_CYCLE_STEPS = 12
+WALK_FRAME_DELAY = 0.018
 WALK_SETTLE_DELAY = 0.04
 ANALOG_WALK_MIN_SPEED_SCALE = 0.35
 ANALOG_WALK_MAX_SPEED_SCALE = 1.35
@@ -241,19 +251,22 @@ BODY_PITCH_FOOT_DEG = 22.0
 BODY_PITCH_KNEE_DEG = -16.0
 MPU6050_ADDRESS = 0x68
 LEVELING_ENABLED = True
-LEVEL_ROLL_GAIN = 0.04
-LEVEL_PITCH_GAIN = 0.04
+LEVEL_ROLL_TARGET_DEG = 0.0
+LEVEL_PITCH_TARGET_DEG = 0.0
+LEVEL_ERROR_DEADBAND_DEG = 1.5
+LEVEL_ROLL_GAIN = 0.035
+LEVEL_PITCH_GAIN = 0.035
 LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
-LEVEL_MAX_ATTITUDE = 0.90
-LEVEL_FILTER_ALPHA = 0.55
+LEVEL_MAX_ATTITUDE = 0.45
+LEVEL_FILTER_ALPHA = 0.70
 LEVEL_SAMPLE_INTERVAL = 0.05
-# Do not feed MPU attitude correction into tripod gait frames. Leveling remains
-# active while standing, but movement uses only the centered gait plus any
-# deliberate right-stick attitude command.
-LEVEL_MOVING_ROLL_SCALE = 0.0
-LEVEL_MOVING_PITCH_SCALE = 0.0
-LEVEL_FORWARD_PITCH_SCALE = 0.0
+# Treat MPU corrections like limited virtual right-stick commands. Moving
+# correction is deliberately weaker than standing correction so a bad reading
+# cannot dominate a tripod support phase.
+LEVEL_MOVING_ROLL_SCALE = 0.65
+LEVEL_MOVING_PITCH_SCALE = 0.65
+LEVEL_FORWARD_PITCH_SCALE = 0.65
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
 MPU_READ_RETRY_DELAY = 0.008
@@ -323,6 +336,10 @@ def validate_ik_constants():
             "Fill in these IK constants before running stand_test_ik.py: "
             + ", ".join(missing)
         )
+    if WALK_VERTICAL_LIFT_MM <= 0.0:
+        raise ValueError("WALK_VERTICAL_LIFT_MM must be positive")
+    if not 0.0 < WALK_VERTICAL_PHASE < 0.5:
+        raise ValueError("WALK_VERTICAL_PHASE must be between 0 and 0.5")
 
 
 def clamp_angle(angle):
@@ -473,7 +490,7 @@ def clamp_reachable_target(x, z):
     return x, z
 
 
-def solve_leg_ik(x, z, previous_pose):
+def solve_leg_ik(x, z, previous_pose, preferred_foot_sign=None):
     x, z = clamp_reachable_target(x, z)
 
     reach_squared = x * x + z * z
@@ -485,8 +502,13 @@ def solve_leg_ik(x, z, previous_pose):
     base_angle = math.atan2(x, z)
     foot_magnitude = math.acos(cos_foot)
 
+    foot_angles = (
+        (math.copysign(foot_magnitude, preferred_foot_sign),)
+        if preferred_foot_sign is not None
+        else (foot_magnitude, -foot_magnitude)
+    )
     candidates = []
-    for foot_angle in (foot_magnitude, -foot_magnitude):
+    for foot_angle in foot_angles:
         knee_angle = base_angle - math.atan2(
             LOWER_LEG_LENGTH * math.sin(foot_angle),
             UPPER_LEG_LENGTH + LOWER_LEG_LENGTH * math.cos(foot_angle),
@@ -496,6 +518,19 @@ def solve_leg_ik(x, z, previous_pose):
         candidates.append((pose_error, pose))
 
     return min(candidates, key=lambda item: item[0])[1]
+
+
+def vertical_swing_pose(home_pose, lift_mm):
+    if lift_mm <= 0.001:
+        return list(home_pose)
+
+    home_x, home_z = foot_position_from_offsets(home_pose[0], home_pose[1])
+    return solve_leg_ik(
+        home_x,
+        home_z - lift_mm,
+        home_pose,
+        preferred_foot_sign=1.0,
+    )
 
 
 def ik_lift_from_contact(contact_pose, body_lift, steps=STAND_STEPS):
@@ -650,6 +685,18 @@ def movement_speed_scale(controller, direction):
 
 def clamp_unit(value):
     return max(-1.0, min(1.0, value))
+
+
+def tilt_to_virtual_stick(angle_degrees, target_degrees, gain, sign):
+    error = angle_degrees - target_degrees
+    if abs(error) <= LEVEL_ERROR_DEADBAND_DEG:
+        return 0.0
+
+    error -= math.copysign(LEVEL_ERROR_DEADBAND_DEG, error)
+    return max(
+        -LEVEL_MAX_ATTITUDE,
+        min(LEVEL_MAX_ATTITUDE, sign * error * gain),
+    )
 
 
 def euler_to_quaternion(roll, pitch, yaw):
@@ -943,19 +990,17 @@ class LevelingController:
             self.filter.euler_degrees()
         )
 
-        target_roll = max(
-            -LEVEL_MAX_ATTITUDE,
-            min(
-                LEVEL_MAX_ATTITUDE,
-                LEVEL_ROLL_SIGN * self.roll_degrees * LEVEL_ROLL_GAIN,
-            ),
+        target_roll = tilt_to_virtual_stick(
+            self.roll_degrees,
+            LEVEL_ROLL_TARGET_DEG,
+            LEVEL_ROLL_GAIN,
+            LEVEL_ROLL_SIGN,
         )
-        target_pitch = max(
-            -LEVEL_MAX_ATTITUDE,
-            min(
-                LEVEL_MAX_ATTITUDE,
-                LEVEL_PITCH_SIGN * self.pitch_degrees * LEVEL_PITCH_GAIN,
-            ),
+        target_pitch = tilt_to_virtual_stick(
+            self.pitch_degrees,
+            LEVEL_PITCH_TARGET_DEG,
+            LEVEL_PITCH_GAIN,
+            LEVEL_PITCH_SIGN,
         )
 
         self.roll = LEVEL_FILTER_ALPHA * self.roll + (
@@ -1243,6 +1288,23 @@ def body_attitude_offsets(leg_name, attitude):
     return foot, knee
 
 
+def smoothstep(value):
+    value = max(0.0, min(1.0, value))
+    return value * value * (3.0 - 2.0 * value)
+
+
+def swing_trajectory(t):
+    """Lift, sweep while clear, then lower instead of drawing a low arc."""
+    if t < WALK_VERTICAL_PHASE:
+        return smoothstep(t / WALK_VERTICAL_PHASE), 0.0
+    if t > 1.0 - WALK_VERTICAL_PHASE:
+        lower_t = (1.0 - t) / WALK_VERTICAL_PHASE
+        return smoothstep(lower_t), 1.0
+
+    sweep_t = (t - WALK_VERTICAL_PHASE) / (1.0 - 2.0 * WALK_VERTICAL_PHASE)
+    return 1.0, smoothstep(sweep_t)
+
+
 def set_walk_frame(
     home_pose,
     swing_tripod,
@@ -1256,8 +1318,7 @@ def set_walk_frame(
     if attitude is None:
         attitude = {"roll": 0.0, "pitch": 0.0}
 
-    eased_t = t * t * (3 - 2 * t)
-    lift = math.sin(math.pi * t)
+    lift, sweep_progress = swing_trajectory(t)
     if direction in (-2, 2):
         hip_swing = LATERAL_HIP_SWING_DEG
         if direction < 0:
@@ -1267,15 +1328,20 @@ def set_walk_frame(
     else:
         hip_swing = WALK_HIP_SWING_DEG
     hip_swing *= hip_swing_scale
-    swing_hip = -hip_swing + (2 * hip_swing * eased_t)
-    stance_hip = hip_swing - (2 * hip_swing * eased_t)
+    swing_hip = -hip_swing + (2 * hip_swing * sweep_progress)
+    stance_hip = hip_swing - (2 * hip_swing * sweep_progress)
 
     for leg_name in swing_tripod:
         hip_scale = hip_motion_scale(leg_name, direction, steering)
-        leg_lift = lift * WALK_LIFT_SCALE[leg_name]
+        lift_mm = WALK_VERTICAL_LIFT_MM * lift * WALK_LIFT_SCALE[leg_name]
+        lift_pose = vertical_swing_pose(home_pose, lift_mm)
         attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
-        swing_foot = home_pose[0] + attitude_foot + WALK_LIFT_FOOT_DELTA * leg_lift
-        swing_knee = home_pose[1] + attitude_knee + WALK_LIFT_KNEE_DELTA * leg_lift
+        swing_foot = (
+            lift_pose[0]
+            + WALK_FOOT_TUCK_TRIM[leg_name]
+            + attitude_foot
+        )
+        swing_knee = lift_pose[1] + attitude_knee
         set_leg_offsets(leg_name, swing_foot, swing_knee)
         set_leg_hip_offset(
             leg_name,
@@ -1287,7 +1353,7 @@ def set_walk_frame(
         attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
         set_leg_offsets(
             leg_name,
-            home_pose[0] + attitude_foot,
+            home_pose[0] + WALK_FOOT_TUCK_TRIM[leg_name] + attitude_foot,
             home_pose[1] + attitude_knee,
         )
         set_leg_hip_offset(
@@ -1474,8 +1540,9 @@ def walk_tripod_cycles(home_pose, cycles=WALK_CYCLES):
         f"lateral_scale={LATERAL_HIP_SWING_SCALE}, "
         f"rotate_scale={ROTATE_HIP_SWING_SCALE}, "
         f"stance_scale={STANCE_HIP_SCALE}, "
-        f"lift_foot={WALK_LIFT_FOOT_DELTA}, "
-        f"lift_knee={WALK_LIFT_KNEE_DELTA}, "
+        f"vertical_lift_mm={WALK_VERTICAL_LIFT_MM}, "
+        f"vertical_phase={WALK_VERTICAL_PHASE}, "
+        f"walk_tuck={WALK_FOOT_TUCK_TRIM}, "
         f"steps={WALK_HALF_CYCLE_STEPS}, delay={WALK_FRAME_DELAY}"
     )
 
