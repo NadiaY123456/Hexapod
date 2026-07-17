@@ -24,6 +24,21 @@ BAUDRATE = 460800
 DEFAULT_WEB_PORT = 8000
 
 
+def direction_label(angle: float) -> str:
+    """Return an eight-way robot-relative label for a lidar angle."""
+    directions = (
+        "forward",
+        "front-right",
+        "right",
+        "rear-right",
+        "behind",
+        "rear-left",
+        "left",
+        "front-left",
+    )
+    return directions[int(((angle % 360.0) + 22.5) // 45.0) % len(directions)]
+
+
 def ensure_driver() -> None:
     """Confirm that the active Python environment contains the C1 driver."""
     try:
@@ -89,7 +104,7 @@ def find_device(requested: str | None) -> str:
 class ScanState:
     def __init__(self, max_range_m: float) -> None:
         self.lock = threading.Lock()
-        self.points: dict[int, dict[str, float | int]] = {}
+        self.points: dict[int, dict[str, float | int | str]] = {}
         self.samples = 0
         self.started = time.monotonic()
         self.last_sample = 0.0
@@ -107,17 +122,26 @@ class ScanState:
                 "angle": round(angle % 360.0, 2),
                 "distance_mm": round(distance, 1),
                 "quality": quality,
+                "direction": direction_label(angle),
+                "seen_at": now,
             }
             self.samples += 1
             self.last_sample = now
 
     def snapshot(self) -> dict[str, object]:
+        now = time.monotonic()
         with self.lock:
-            points = list(self.points.values())
+            stale = [bucket for bucket, point in self.points.items() if now - float(point["seen_at"]) > 1.0]
+            for bucket in stale:
+                del self.points[bucket]
+            points = [
+                {key: value for key, value in point.items() if key != "seen_at"}
+                for point in self.points.values()
+            ]
             samples = self.samples
             last_sample = self.last_sample
             error = self.error
-        distances = [float(point["distance_mm"]) for point in points]
+        nearest = min(points, key=lambda point: float(point["distance_mm"]), default=None)
         return {
             "device": self.device,
             "baudrate": BAUDRATE,
@@ -125,8 +149,10 @@ class ScanState:
             "points": points,
             "point_count": len(points),
             "samples": samples,
-            "samples_per_second": round(samples / max(time.monotonic() - self.started, 0.001)),
-            "nearest_mm": min(distances) if distances else None,
+            "samples_per_second": round(samples / max(now - self.started, 0.001)),
+            "nearest_mm": nearest["distance_mm"] if nearest else None,
+            "nearest_angle": nearest["angle"] if nearest else None,
+            "nearest_direction": nearest["direction"] if nearest else None,
             "max_range_mm": self.max_range_mm,
             "error": error,
         }
@@ -151,7 +177,7 @@ x.strokeStyle='#284154';x.beginPath();x.moveTo(cx-r,cy);x.lineTo(cx+r,cy);x.move
 x.fillStyle='#22d3ee';for(const p of data.points){const a=p.angle*Math.PI/180,d=Math.min(p.distance_mm/max,1)*r;x.beginPath();x.arc(cx+Math.sin(a)*d,cy-Math.cos(a)*d,2.5,0,Math.PI*2);x.fill()}
 x.fillStyle='#fbbf24';x.beginPath();x.arc(cx,cy,7,0,Math.PI*2);x.fill();
 statusEl.className=data.connected?'ok':'bad';statusEl.textContent=data.connected?'● Live scan':'● Waiting for lidar data';
-stats.textContent=`${data.device} · ${data.point_count} directions · ${data.samples_per_second} samples/s · nearest ${data.nearest_mm==null?'—':(data.nearest_mm/1000).toFixed(2)+' m'}`;if(data.error)statusEl.textContent=data.error}
+stats.textContent=`${data.device} · ${data.point_count} directions · ${data.samples_per_second} samples/s · nearest ${data.nearest_mm==null?'—':(data.nearest_mm/1000).toFixed(2)+' m '+data.nearest_direction+' ('+Number(data.nearest_angle).toFixed(1)+'°)'}`;if(data.error)statusEl.textContent=data.error}
 async function update(){try{const response=await fetch('/scan',{cache:'no-store'});draw(await response.json())}catch(e){statusEl.className='bad';statusEl.textContent='Viewer lost connection'}}setInterval(update,100);update();
 </script></body></html>"""
 
@@ -197,7 +223,14 @@ async def print_summaries(state: ScanState) -> None:
         await asyncio.sleep(0.5)
         data = state.snapshot()
         nearest = data["nearest_mm"]
-        nearest_text = "none" if nearest is None else f"{float(nearest) / 1000:.2f} m"
+        nearest_text = (
+            "none"
+            if nearest is None
+            else (
+                f"{float(nearest) / 1000:.2f} m "
+                f"{data['nearest_direction']} ({float(data['nearest_angle']):.1f}°)"
+            )
+        )
         print(
             f"LIDAR: {data['point_count']} directions, "
             f"{data['samples_per_second']} samples/s, nearest={nearest_text}",
@@ -228,7 +261,8 @@ async def run_lidar(device: str, state: ScanState, print_every_point: bool) -> N
             state.add(angle, distance, quality)
             if print_every_point:
                 print(
-                    f"angle={angle:7.2f}°  distance={distance:8.1f} mm  quality={quality}",
+                    f"direction={direction_label(angle):>11}  angle={angle:7.2f}°  "
+                    f"distance={distance:8.1f} mm  quality={quality}",
                     flush=True,
                 )
     except asyncio.TimeoutError as error:
