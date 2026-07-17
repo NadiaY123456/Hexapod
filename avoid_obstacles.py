@@ -1,4 +1,4 @@
-"""Walk forward and turn around close obstacles seen by the AI Camera.
+"""Walk forward and turn around obstacles seen by the AI Camera and lidar.
 
 The robot stands up when the program starts, but does not walk until W is
 pressed. W starts/resumes forward walking, S stops all walking while holding
@@ -6,17 +6,18 @@ the standing pose, P disengages the servos, and O stands up again without
 walking. Camera monitoring continues throughout. Ctrl+C exits the whole
 program.
 
-Distance is estimated from bounding-box width, as in human_distance.py. Since
-different objects have different real widths, --object-width-m should be tuned
-for the obstacles expected in the robot's environment.
+The camera identifies objects while the RPLIDAR C1 measures the physical path
+in front of the robot. Lidar readings also choose the clearer turn direction.
 """
 
 import argparse
+import asyncio
 import json
 import os
 import select
 import sys
 import termios
+import threading
 import time
 import tty
 from functools import lru_cache
@@ -33,6 +34,165 @@ from ai_camera_object_detection import (
     load_labels,
     rectangle_to_box,
 )
+
+
+def signed_lidar_angle(angle):
+    """Convert 0..360 degrees to -180..180, with forward at zero."""
+    return ((float(angle) + 180.0) % 360.0) - 180.0
+
+
+class LidarObstacleMonitor:
+    """Continuously read the C1 in a background thread without delaying gait."""
+
+    def __init__(self, device, stop_distance_m, forward_angle_deg, forward_offset_deg):
+        self.device = device
+        self.stop_distance_mm = stop_distance_m * 1000.0
+        self.forward_angle_deg = forward_angle_deg
+        self.forward_offset_deg = forward_offset_deg
+        self.points = {}
+        self.lock = threading.Lock()
+        self.stop_requested = threading.Event()
+        self.data_ready = threading.Event()
+        self.thread = None
+        self.last_packet = 0.0
+        self.error = None
+
+    def start(self):
+        self.thread = threading.Thread(target=self._thread_main, daemon=True)
+        self.thread.start()
+        if not self.data_ready.wait(timeout=8.0):
+            raise RuntimeError(
+                f"RPLIDAR C1 on {self.device} did not produce data within 8 seconds."
+            )
+        if self.error is not None:
+            raise RuntimeError(f"RPLIDAR C1 failed: {self.error}") from self.error
+
+    def stop(self):
+        self.stop_requested.set()
+        if self.thread is not None:
+            self.thread.join(timeout=3.0)
+
+    def _thread_main(self):
+        try:
+            asyncio.run(self._scan())
+        except Exception as error:
+            self.error = error
+            self.data_ready.set()
+
+    async def _scan(self):
+        from rplidarc1 import RPLidar
+
+        lidar = RPLidar(self.device, 460800)
+        scan_task = asyncio.create_task(lidar.simple_scan(make_return_dict=False))
+        try:
+            while not self.stop_requested.is_set():
+                try:
+                    item = await asyncio.wait_for(lidar.output_queue.get(), timeout=0.25)
+                except asyncio.TimeoutError:
+                    continue
+                now = time.monotonic()
+                self.last_packet = now
+                self.data_ready.set()
+                try:
+                    angle = float(item["a_deg"]) % 360.0
+                    distance_value = item["d_mm"]
+                    if distance_value is None:
+                        continue
+                    distance_mm = float(distance_value)
+                    quality = int(item["q"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if distance_mm <= 0.0:
+                    continue
+                with self.lock:
+                    self.points[round(angle) % 360] = {
+                        "angle": angle,
+                        "distance_mm": distance_mm,
+                        "quality": quality,
+                        "seen_at": now,
+                    }
+        finally:
+            lidar.stop_event.set()
+            try:
+                await asyncio.wait_for(scan_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                scan_task.cancel()
+            try:
+                lidar.shutdown()
+            except Exception:
+                lidar.reset()
+
+    def snapshot(self):
+        now = time.monotonic()
+        with self.lock:
+            points = [
+                point.copy()
+                for point in self.points.values()
+                if now - point["seen_at"] <= 1.0
+            ]
+        live = self.error is None and now - self.last_packet <= 1.5
+
+        def relative_angle(point):
+            return signed_lidar_angle(point["angle"] - self.forward_offset_deg)
+
+        forward = [
+            point
+            for point in points
+            if abs(relative_angle(point)) <= self.forward_angle_deg
+        ]
+        blocking_points = [
+            point
+            for point in forward
+            if point["distance_mm"] <= self.stop_distance_mm
+        ]
+        nearest = min(blocking_points, key=lambda point: point["distance_mm"], default=None)
+
+        def side_clearance(side):
+            if side == "left":
+                side_points = [
+                    point for point in points
+                    if -120.0 <= relative_angle(point) <= -15.0
+                ]
+            else:
+                side_points = [
+                    point for point in points
+                    if 15.0 <= relative_angle(point) <= 120.0
+                ]
+            return min(
+                (point["distance_mm"] for point in side_points),
+                default=12000.0,
+            )
+
+        turn_direction = None
+        if nearest is not None:
+            obstacle_angle = relative_angle(nearest)
+            if obstacle_angle > 5.0:
+                turn_direction = "left"
+            elif obstacle_angle < -5.0:
+                turn_direction = "right"
+            else:
+                left_clearance = side_clearance("left")
+                right_clearance = side_clearance("right")
+                if left_clearance > right_clearance:
+                    turn_direction = "left"
+                elif right_clearance > left_clearance:
+                    turn_direction = "right"
+
+        return {
+            "live": live,
+            "blocking": bool(blocking_points),
+            "nearest_m": (
+                round(nearest["distance_mm"] / 1000.0, 3)
+                if nearest is not None else None
+            ),
+            "nearest_angle_deg": (
+                round(relative_angle(nearest), 1)
+                if nearest is not None else None
+            ),
+            "turn_direction": turn_direction,
+            "forward_half_angle_deg": self.forward_angle_deg,
+            "error": str(self.error) if self.error is not None else None,
+        }
 
 
 class KeyboardControls:
@@ -65,13 +225,13 @@ class KeyboardControls:
 
 
 class ObstacleStatusPrinter:
-    """Print every AI Camera detection and its estimated distance as JSON."""
+    """Print camera and lidar obstacle state as JSON."""
 
     def __init__(self, interval):
         self.interval = interval
         self.last_print = 0.0
 
-    def print(self, detections, frame_size, args, blocking, motion):
+    def print(self, detections, frame_size, args, blocking, motion, lidar_status):
         now = time.monotonic()
         if now - self.last_print < self.interval:
             return
@@ -81,6 +241,7 @@ class ObstacleStatusPrinter:
         for detection in detections:
             distance_m = obstacle_distance(detection, frame_w, args)
             center_x, center_y = detection.center
+            in_forward_view = camera_detection_is_forward(detection, frame_w, args)
             item = {
                 "label": detection.label,
                 "confidence": round(detection.confidence, 3),
@@ -90,7 +251,9 @@ class ObstacleStatusPrinter:
                     round((center_x - frame_w / 2) / (frame_w / 2), 3),
                     round((center_y - frame_h / 2) / (frame_h / 2), 3),
                 ],
-                "nearby": distance_m is not None
+                "in_forward_view": in_forward_view,
+                "nearby": in_forward_view
+                and distance_m is not None
                 and distance_m <= args.stop_distance_m,
             }
             if distance_m is not None:
@@ -105,6 +268,7 @@ class ObstacleStatusPrinter:
             "nearby_obstacle": blocking,
             "motion": motion,
             "detections": items,
+            "lidar": lidar_status,
         }
         print(json.dumps(payload, separators=(",", ":")))
 
@@ -133,6 +297,35 @@ def get_args():
         help="Avoid any detected object at or below this distance (default: 0.75m).",
     )
     parser.add_argument(
+        "--camera-forward-half-width",
+        type=float,
+        default=0.45,
+        help="Camera center corridor as a fraction of half-frame width (default: 0.45).",
+    )
+    parser.add_argument(
+        "--lidar-device",
+        default="/dev/ttyUSB0",
+        help="RPLIDAR C1 serial device (default: /dev/ttyUSB0).",
+    )
+    parser.add_argument(
+        "--lidar-stop-distance-m",
+        type=float,
+        default=0.75,
+        help="Stop for a forward lidar return at or below this range (default: 0.75m).",
+    )
+    parser.add_argument(
+        "--lidar-forward-angle-deg",
+        type=float,
+        default=35.0,
+        help="Half-width of the forward lidar corridor in degrees (default: 35).",
+    )
+    parser.add_argument(
+        "--lidar-forward-offset-deg",
+        type=float,
+        default=0.0,
+        help="Raw lidar angle that points forward on the mounted robot (default: 0).",
+    )
+    parser.add_argument(
         "--clear-frames",
         type=int,
         default=3,
@@ -158,8 +351,16 @@ def get_args():
     parser.add_argument("--preserve-aspect-ratio", action=argparse.BooleanOptionalAction)
     args = parser.parse_args()
 
-    if args.object_width_m <= 0.0 or args.stop_distance_m <= 0.0:
-        parser.error("object-width-m and stop-distance-m must be positive")
+    if (
+        args.object_width_m <= 0.0
+        or args.stop_distance_m <= 0.0
+        or args.lidar_stop_distance_m <= 0.0
+    ):
+        parser.error("camera and lidar distance settings must be positive")
+    if not 0.0 < args.camera_forward_half_width <= 1.0:
+        parser.error("camera-forward-half-width must be within 0..1")
+    if not 0.0 < args.lidar_forward_angle_deg < 90.0:
+        parser.error("lidar-forward-angle-deg must be between 0 and 90")
     if args.clear_frames < 1 or args.walk_steps < 1:
         parser.error("clear-frames and walk-steps must be at least 1")
     if args.walk_frame_delay < 0.0 or args.print_interval < 0.0:
@@ -186,10 +387,22 @@ def obstacle_distance(detection, frame_width, args):
     )
 
 
+def camera_detection_is_forward(detection, frame_width, args):
+    """Return whether a camera detection overlaps the forward image corridor."""
+    corridor_half_width = frame_width / 2 * args.camera_forward_half_width
+    corridor_left = frame_width / 2 - corridor_half_width
+    corridor_right = frame_width / 2 + corridor_half_width
+    box_left = detection.box[0]
+    box_right = box_left + detection.box[2]
+    return box_right >= corridor_left and box_left <= corridor_right
+
+
 def select_obstacle(detections, frame_size, args):
     """Return the nearest detection and whether any detection is nearby."""
     candidates = []
     for detection in detections:
+        if not camera_detection_is_forward(detection, frame_size[0], args):
+            continue
         distance_m = obstacle_distance(detection, frame_size[0], args)
         if distance_m is not None:
             candidates.append((distance_m, detection))
@@ -291,7 +504,11 @@ def main():
             for detection in detections:
                 x, y, box_w, box_h = detection.box
                 distance_m = obstacle_distance(detection, width, args)
-                nearby = distance_m is not None and distance_m <= args.stop_distance_m
+                nearby = (
+                    camera_detection_is_forward(detection, width, args)
+                    and distance_m is not None
+                    and distance_m <= args.stop_distance_m
+                )
                 box_color = (0, 0, 255) if nearby else (0, 255, 0)
                 cv2.rectangle(
                     mapped.array, (x, y), (x + box_w, y + box_h), box_color, 3
@@ -314,9 +531,16 @@ def main():
     leveler = None
     walking_enabled = False
     avoiding = False
+    avoid_turn_direction = args.turn_direction
     clear_frames = 0
     next_swing = None
     status_printer = ObstacleStatusPrinter(args.print_interval)
+    lidar_monitor = LidarObstacleMonitor(
+        args.lidar_device,
+        args.lidar_stop_distance_m,
+        args.lidar_forward_angle_deg,
+        args.lidar_forward_offset_deg,
+    )
 
     def stand_robot():
         nonlocal walk, home_pose, leveler, next_swing
@@ -340,6 +564,9 @@ def main():
         }
 
     try:
+        print(f"Starting RPLIDAR C1 on {args.lidar_device} at 460800 baud.")
+        lidar_monitor.start()
+        print("Lidar ready; forward path monitoring is active.")
         stand_robot()
         motion = "standing"
         print("Camera ready. Robot is standing still and waiting for W.")
@@ -385,12 +612,21 @@ def main():
                 metadata = picam2.capture_metadata()
                 current = parse_detections(metadata)
                 frame_size = picam2.camera_configuration()["main"]["size"]
-                _, _, blocking_now = select_obstacle(
+                _, _, camera_blocking = select_obstacle(
                     current, frame_size, args
                 )
+                lidar_status = lidar_monitor.snapshot()
+                lidar_blocking = lidar_status["blocking"]
+                lidar_unavailable = not lidar_status["live"]
+                blocking_now = camera_blocking or lidar_blocking or lidar_unavailable
 
                 if walking_enabled:
                     if blocking_now:
+                        if not avoiding:
+                            avoid_turn_direction = (
+                                lidar_status["turn_direction"]
+                                or args.turn_direction
+                            )
                         avoiding = True
                         clear_frames = 0
                     elif avoiding:
@@ -402,17 +638,30 @@ def main():
                 blocking = blocking_now
                 if not walking_enabled:
                     motion = "stopped" if home_pose is not None else "disengaged"
+                elif lidar_unavailable:
+                    motion = "stopped_lidar_unavailable"
                 elif avoiding:
-                    motion = f"turning_{args.turn_direction}"
+                    motion = f"turning_{avoid_turn_direction}"
                 else:
                     motion = "walking_forward"
-                status_printer.print(current, frame_size, args, blocking, motion)
+                status_printer.print(
+                    current,
+                    frame_size,
+                    args,
+                    blocking,
+                    motion,
+                    lidar_status,
+                )
 
                 if not walking_enabled:
                     continue
+                if lidar_unavailable:
+                    walk.hold_standing_pose(home_pose, autonomous_attitude())
+                    time.sleep(0.05)
+                    continue
 
                 direction = (
-                    (-3 if args.turn_direction == "left" else 3)
+                    (-3 if avoid_turn_direction == "left" else 3)
                     if avoiding else 1
                 )
                 stance_tripod = (
@@ -433,6 +682,7 @@ def main():
         print("\nCtrl+C: quitting and disengaging.")
         return 0
     finally:
+        lidar_monitor.stop()
         picam2.stop()
         if walk is not None:
             walk.release_all()
