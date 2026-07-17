@@ -167,7 +167,7 @@ WALK_LIFT_SCALE = {
     "leg3": 1.25,
     "leg4": 1.0,
     "leg5": 1.0,
-    "leg6": 1.25,
+    "leg6": 1.35,
 }
 WALK_KNEE_LIFT_SCALE = {
     "leg1": 1.0,
@@ -175,7 +175,7 @@ WALK_KNEE_LIFT_SCALE = {
     "leg3": 1.25,
     "leg4": 1.0,
     "leg5": 1.0,
-    "leg6": 1.35,
+    "leg6": 1.45,
 }
 WALK_HIP_SWING_DEG = 15.0
 LATERAL_HIP_SWING_DEG = 24.0
