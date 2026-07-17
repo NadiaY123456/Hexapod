@@ -86,7 +86,7 @@ TRIMS = {
     "leg5": {"foot": 8.5, "knee": -7.0},
     # Keep the foot away from its high-current outward position. The coupled
     # knee trim restores the leg height lost when the foot moved inward.
-    "leg6": {"foot": -2.0, "knee": 1.0},
+    "leg6": {"foot": -5.0, "knee": 1.0},
 }
 
 # Hip/body yaw calibration for walking. Legs 1-3 and 4-6 are assumed to be on
