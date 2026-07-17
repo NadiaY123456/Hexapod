@@ -213,9 +213,18 @@ async def run_lidar(device: str, state: ScanState, print_every_point: bool) -> N
     try:
         while True:
             item = await asyncio.wait_for(lidar.output_queue.get(), timeout=3.0)
-            angle = float(item["a_deg"])
-            distance = float(item["d_mm"])
-            quality = int(item["q"])
+            # The C1 driver represents a zero/invalid range as None. Those
+            # samples are normal (for example, when no laser return is seen)
+            # and should not stop the scan.
+            try:
+                angle = float(item["a_deg"])
+                distance_value = item["d_mm"]
+                quality = int(item["q"])
+                if distance_value is None:
+                    continue
+                distance = float(distance_value)
+            except (KeyError, TypeError, ValueError):
+                continue
             state.add(angle, distance, quality)
             if print_every_point:
                 print(
