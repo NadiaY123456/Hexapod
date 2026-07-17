@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """RPLIDAR C1 console monitor and live browser view.
 
-Run this file directly on the Raspberry Pi. On its first run it creates a
-small virtual environment beside this file and installs the C1-specific
-``rplidarc1`` driver. No ROS, Flask, or changes to the robot code are needed.
+Run this file directly on the Raspberry Pi from the Python environment where
+the C1-specific ``rplidarc1`` driver is installed. No ROS, Flask, or changes
+to the robot code are needed.
 """
 
 from __future__ import annotations
@@ -14,55 +14,26 @@ import glob
 import json
 import os
 import socket
-import subprocess
 import sys
 import threading
 import time
-import venv
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 
 BAUDRATE = 460800
 DEFAULT_WEB_PORT = 8000
-VENV_DIR = Path(__file__).resolve().with_name(".lidar_venv")
 
 
 def ensure_driver() -> None:
-    """Create an isolated environment and install the C1 driver if needed."""
+    """Confirm that the active Python environment contains the C1 driver."""
     try:
         from scanner import RPLidar  # noqa: F401
-
-        return
-    except ImportError:
-        pass
-
-    if os.environ.get("LIDAR_BOOTSTRAPPED") == "1":
+    except ImportError as error:
         raise SystemExit(
-            "Could not import the RPLIDAR C1 driver after installation.\n"
-            "Delete .lidar_venv and run this program again."
-        )
-
-    python = VENV_DIR / "bin" / "python"
-    if not python.exists():
-        print(f"First-time setup: creating {VENV_DIR}")
-        venv.EnvBuilder(with_pip=True).create(VENV_DIR)
-
-    print("First-time setup: installing the RPLIDAR C1 driver...")
-    try:
-        subprocess.run(
-            [str(python), "-m", "pip", "install", "rplidarc1==0.1.3"],
-            check=True,
-        )
-    except subprocess.CalledProcessError as error:
-        raise SystemExit(
-            "Driver installation failed. Check the Pi's internet connection and "
-            f"try again. pip exited with status {error.returncode}."
+            "The RPLIDAR C1 driver is not installed in the active Python environment.\n"
+            "Activate your virtual environment, then run:\n"
+            f"  {sys.executable} -m pip install rplidarc1==0.1.3"
         ) from error
-
-    environment = os.environ.copy()
-    environment["LIDAR_BOOTSTRAPPED"] = "1"
-    os.execve(str(python), [str(python), str(Path(__file__).resolve()), *sys.argv[1:]], environment)
 
 
 def parse_args() -> argparse.Namespace:
