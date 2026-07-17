@@ -47,7 +47,13 @@ LEG_CHANNELS = {
     "leg3": {"driver": "0x40", "foot": 12, "knee": 9, "hip": 10},
     "leg4": {"driver": "0x41", "foot": 0, "knee": 1, "hip": 2},
     "leg5": {"driver": "0x41", "foot": 4, "knee": 5, "hip": 6},
-    "leg6": {"driver": "0x41", "foot": 8, "knee": 9, "hip": 10},
+    "leg6": {
+        "driver": "0x41",
+        "foot_driver": "0x40",
+        "foot": 3,
+        "knee": 9,
+        "hip": 10,
+    },
 }
 
 NEUTRALS = {
@@ -302,14 +308,16 @@ hips = {}
 
 for leg_name, channels in LEG_CHANNELS.items():
     legs[leg_name] = {}
-    driver = kits[channels["driver"]]
 
     for joint_name in ("foot", "knee"):
+        driver_name = channels.get(f"{joint_name}_driver", channels["driver"])
+        driver = kits[driver_name]
         servo = driver.servo[channels[joint_name]]
         servo.actuation_range = 180
         servo.set_pulse_width_range(700, 2300)
         legs[leg_name][joint_name] = servo
 
+    driver = kits[channels["driver"]]
     hip_servo = driver.servo[channels["hip"]]
     hip_servo.actuation_range = 180
     hip_servo.set_pulse_width_range(700, 2300)
