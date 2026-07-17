@@ -27,7 +27,7 @@ DEFAULT_WEB_PORT = 8000
 def ensure_driver() -> None:
     """Confirm that the active Python environment contains the C1 driver."""
     try:
-        from scanner import RPLidar  # noqa: F401
+        from rplidarc1 import RPLidar  # noqa: F401
     except ImportError as error:
         raise SystemExit(
             "The RPLIDAR C1 driver is not installed in the active Python environment.\n"
@@ -206,7 +206,7 @@ async def print_summaries(state: ScanState) -> None:
 
 
 async def run_lidar(device: str, state: ScanState, print_every_point: bool) -> None:
-    from scanner import RPLidar
+    from rplidarc1 import RPLidar
 
     lidar = RPLidar(device, BAUDRATE)
     scan_task = asyncio.create_task(lidar.simple_scan(make_return_dict=False))
