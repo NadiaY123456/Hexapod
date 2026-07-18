@@ -44,6 +44,20 @@ def signed_lidar_angle(angle):
     return ((float(angle) + 180.0) % 360.0) - 180.0
 
 
+def ensure_lidar_driver():
+    """Fail early with an install command for the active Python environment."""
+    try:
+        from rplidarc1 import RPLidar  # noqa: F401
+    except ImportError as error:
+        raise SystemExit(
+            "The RPLIDAR C1 driver is not installed in the Python environment "
+            "running this program.\n"
+            "Install it with this exact interpreter, then run the program again:\n"
+            f"  {sys.executable} -m pip install rplidarc1==0.1.3\n"
+            f"Active interpreter: {sys.executable}"
+        ) from error
+
+
 class LidarObstacleMonitor:
     """Continuously read the C1 in a background thread without delaying gait."""
 
@@ -611,6 +625,7 @@ def select_obstacle(detections, frame_size, args):
 
 def main():
     args = get_args()
+    ensure_lidar_driver()
     cv2, MappedArray, Picamera2, IMX500, NetworkIntrinsics, nanodet = (
         import_camera_stack()
     )
