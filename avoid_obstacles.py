@@ -7,7 +7,9 @@ walking. Camera monitoring continues throughout. Ctrl+C exits the whole
 program.
 
 The camera identifies objects while the RPLIDAR C1 measures the physical path
-in front of the robot. Lidar readings also choose the clearer turn direction.
+in front of the robot. The robot veers toward the clearer side, follows the
+obstacle at a target distance, and then counter-steers back to its original
+travel heading.
 """
 
 import argparse
@@ -21,6 +23,7 @@ import threading
 import time
 import tty
 from functools import lru_cache
+from statistics import median
 
 from ai_camera_object_detection import (
     AI_CAMERA_FOCAL_LENGTH_MM,
@@ -163,6 +166,24 @@ class LidarObstacleMonitor:
                 default=12000.0,
             )
 
+        def side_distance(side):
+            if side == "left":
+                side_points = [
+                    point for point in points
+                    if -135.0 <= relative_angle(point) <= -45.0
+                ]
+            else:
+                side_points = [
+                    point for point in points
+                    if 45.0 <= relative_angle(point) <= 135.0
+                ]
+            if not side_points:
+                return None
+            # A median of the closest returns follows the obstacle surface but
+            # rejects a single unusually short lidar sample.
+            distances = sorted(point["distance_mm"] for point in side_points)
+            return median(distances[:5]) / 1000.0
+
         turn_direction = None
         if nearest is not None:
             obstacle_angle = relative_angle(nearest)
@@ -190,8 +211,134 @@ class LidarObstacleMonitor:
                 if nearest is not None else None
             ),
             "turn_direction": turn_direction,
+            "left_distance_m": side_distance("left"),
+            "right_distance_m": side_distance("right"),
             "forward_half_angle_deg": self.forward_angle_deg,
             "error": str(self.error) if self.error is not None else None,
+        }
+
+
+class ObstacleBypassController:
+    """Steer around one obstacle and recover the original travel heading."""
+
+    def __init__(
+        self,
+        target_distance_m,
+        max_steering,
+        follow_gain,
+        heading_tolerance_deg,
+        emergency_distance_m,
+        fallback_direction,
+    ):
+        self.target_distance_m = target_distance_m
+        self.max_steering = max_steering
+        self.follow_gain = follow_gain
+        self.heading_tolerance_deg = heading_tolerance_deg
+        self.emergency_distance_m = emergency_distance_m
+        self.fallback_direction = fallback_direction
+        self.reset()
+
+    def reset(self):
+        self.phase = "cruise"
+        self.bypass_side = None
+        self.heading_error_deg = 0.0
+        self.phase_cycles = 0
+        self.side_missing_cycles = 0
+
+    def _start_bypass(self, lidar_status):
+        self.phase = "veer_out"
+        self.bypass_side = (
+            lidar_status.get("turn_direction") or self.fallback_direction
+        )
+        self.heading_error_deg = 0.0
+        self.phase_cycles = 0
+        self.side_missing_cycles = 0
+
+    def _away_steering(self):
+        return -self.max_steering if self.bypass_side == "left" else self.max_steering
+
+    def _obstacle_side_distance(self, lidar_status):
+        # Passing on the left leaves the obstacle on the robot's right, and
+        # passing on the right leaves it on the robot's left.
+        key = "right_distance_m" if self.bypass_side == "left" else "left_distance_m"
+        return lidar_status.get(key)
+
+    def update(self, lidar_status, camera_blocking):
+        """Return a motion mode and steering command for the next half-cycle."""
+        if not lidar_status["live"]:
+            return {"mode": "stopped_lidar_unavailable", "steering": 0.0}
+
+        nearest_m = lidar_status.get("nearest_m")
+        if nearest_m is not None and nearest_m <= self.emergency_distance_m:
+            return {"mode": "stopped_emergency", "steering": 0.0}
+
+        obstacle_ahead = lidar_status["blocking"] or camera_blocking
+        if self.phase == "cruise":
+            if not obstacle_ahead:
+                return {"mode": "forward", "steering": 0.0}
+            self._start_bypass(lidar_status)
+
+        if self.phase == "veer_out":
+            side_distance = self._obstacle_side_distance(lidar_status)
+            if not obstacle_ahead and side_distance is not None and self.phase_cycles >= 2:
+                self.phase = "follow_side"
+                self.phase_cycles = 0
+            elif not obstacle_ahead and side_distance is None and self.phase_cycles >= 4:
+                self.phase = "return_heading"
+                self.phase_cycles = 0
+            return {"mode": "veer_out", "steering": self._away_steering()}
+
+        if self.phase == "follow_side":
+            if obstacle_ahead:
+                self.side_missing_cycles = 0
+                return {"mode": "follow_side", "steering": self._away_steering()}
+
+            side_distance = self._obstacle_side_distance(lidar_status)
+            if side_distance is None:
+                self.side_missing_cycles += 1
+                if self.side_missing_cycles >= 3:
+                    self.phase = "return_heading"
+                    self.phase_cycles = 0
+                return {"mode": "follow_side", "steering": 0.0}
+
+            self.side_missing_cycles = 0
+            distance_error = side_distance - self.target_distance_m
+            toward_obstacle_sign = 1.0 if self.bypass_side == "left" else -1.0
+            correction = (
+                toward_obstacle_sign
+                * self.follow_gain
+                * distance_error
+                / self.target_distance_m
+            )
+            steering = max(-self.max_steering, min(self.max_steering, correction))
+            return {"mode": "follow_side", "steering": steering}
+
+        if self.phase == "return_heading":
+            if obstacle_ahead:
+                self._start_bypass(lidar_status)
+                return {"mode": "veer_out", "steering": self._away_steering()}
+            if abs(self.heading_error_deg) <= self.heading_tolerance_deg:
+                self.reset()
+                return {"mode": "forward", "steering": 0.0}
+            correction = -self.heading_error_deg / 25.0
+            steering = max(-self.max_steering, min(self.max_steering, correction))
+            return {"mode": "return_heading", "steering": steering}
+
+        self.reset()
+        return {"mode": "forward", "steering": 0.0}
+
+    def completed_half_cycle(self, steering, yaw_deg_per_half_cycle):
+        """Update commanded-heading estimate after a completed gait half-cycle."""
+        if self.phase != "cruise":
+            self.heading_error_deg += steering * yaw_deg_per_half_cycle
+            self.phase_cycles += 1
+
+    def status(self):
+        return {
+            "phase": self.phase,
+            "bypass_side": self.bypass_side,
+            "target_side_distance_m": self.target_distance_m,
+            "estimated_heading_error_deg": round(self.heading_error_deg, 1),
         }
 
 
@@ -310,8 +457,8 @@ def get_args():
     parser.add_argument(
         "--lidar-stop-distance-m",
         type=float,
-        default=0.75,
-        help="Stop for a forward lidar return at or below this range (default: 0.75m).",
+        default=1.25,
+        help="Begin bypassing a forward lidar return at this range (default: 1.25m).",
     )
     parser.add_argument(
         "--lidar-forward-angle-deg",
@@ -324,6 +471,36 @@ def get_args():
         type=float,
         default=0.0,
         help="Raw lidar angle that points forward on the mounted robot (default: 0).",
+    )
+    parser.add_argument(
+        "--bypass-distance-m",
+        type=float,
+        default=0.65,
+        help="Target side distance while passing an obstacle (default: 0.65m).",
+    )
+    parser.add_argument(
+        "--bypass-max-steering",
+        type=float,
+        default=0.75,
+        help="Maximum forward-steering command during a bypass (default: 0.75).",
+    )
+    parser.add_argument(
+        "--bypass-follow-gain",
+        type=float,
+        default=0.80,
+        help="Side-distance correction strength (default: 0.80).",
+    )
+    parser.add_argument(
+        "--bypass-heading-tolerance-deg",
+        type=float,
+        default=5.0,
+        help="Heading error allowed before completing a bypass (default: 5 degrees).",
+    )
+    parser.add_argument(
+        "--lidar-emergency-distance-m",
+        type=float,
+        default=0.30,
+        help="Hold position if an obstacle is critically close (default: 0.30m).",
     )
     parser.add_argument(
         "--clear-frames",
@@ -355,12 +532,22 @@ def get_args():
         args.object_width_m <= 0.0
         or args.stop_distance_m <= 0.0
         or args.lidar_stop_distance_m <= 0.0
+        or args.bypass_distance_m <= 0.0
+        or args.lidar_emergency_distance_m <= 0.0
     ):
         parser.error("camera and lidar distance settings must be positive")
     if not 0.0 < args.camera_forward_half_width <= 1.0:
         parser.error("camera-forward-half-width must be within 0..1")
     if not 0.0 < args.lidar_forward_angle_deg < 90.0:
         parser.error("lidar-forward-angle-deg must be between 0 and 90")
+    if not 0.0 < args.bypass_max_steering <= 1.0:
+        parser.error("bypass-max-steering must be within 0..1")
+    if args.bypass_follow_gain <= 0.0:
+        parser.error("bypass-follow-gain must be positive")
+    if not 0.0 < args.bypass_heading_tolerance_deg < 45.0:
+        parser.error("bypass-heading-tolerance-deg must be between 0 and 45")
+    if args.lidar_emergency_distance_m >= args.lidar_stop_distance_m:
+        parser.error("lidar-emergency-distance-m must be below lidar-stop-distance-m")
     if args.clear_frames < 1 or args.walk_steps < 1:
         parser.error("clear-frames and walk-steps must be at least 1")
     if args.walk_frame_delay < 0.0 or args.print_interval < 0.0:
@@ -530,9 +717,6 @@ def main():
     home_pose = None
     leveler = None
     walking_enabled = False
-    avoiding = False
-    avoid_turn_direction = args.turn_direction
-    clear_frames = 0
     next_swing = None
     status_printer = ObstacleStatusPrinter(args.print_interval)
     lidar_monitor = LidarObstacleMonitor(
@@ -540,6 +724,14 @@ def main():
         args.lidar_stop_distance_m,
         args.lidar_forward_angle_deg,
         args.lidar_forward_offset_deg,
+    )
+    bypass_controller = ObstacleBypassController(
+        args.bypass_distance_m,
+        args.bypass_max_steering,
+        args.bypass_follow_gain,
+        args.bypass_heading_tolerance_deg,
+        args.lidar_emergency_distance_m,
+        args.turn_direction,
     )
 
     def stand_robot():
@@ -579,8 +771,7 @@ def main():
                 if disengage_requested:
                     print("P pressed: disengaging.")
                     walking_enabled = False
-                    avoiding = False
-                    clear_frames = 0
+                    bypass_controller.reset()
                     motion = "disengaged"
                     if walk is not None:
                         walk.release_all()
@@ -589,16 +780,14 @@ def main():
                     next_swing = None
                 elif b"s" in keys:
                     walking_enabled = False
-                    avoiding = False
-                    clear_frames = 0
+                    bypass_controller.reset()
                     motion = "stopped"
                     if home_pose is not None:
                         walk.hold_standing_pose(home_pose, autonomous_attitude())
                     print("S pressed: walking stopped.")
                 elif b"o" in keys:
                     walking_enabled = False
-                    avoiding = False
-                    clear_frames = 0
+                    bypass_controller.reset()
                     stand_robot()
                     walk.hold_standing_pose(home_pose, autonomous_attitude())
                     motion = "standing"
@@ -618,30 +807,32 @@ def main():
                 lidar_status = lidar_monitor.snapshot()
                 lidar_blocking = lidar_status["blocking"]
                 lidar_unavailable = not lidar_status["live"]
-                blocking_now = camera_blocking or lidar_blocking or lidar_unavailable
-
-                if walking_enabled:
-                    if blocking_now:
-                        if not avoiding:
-                            avoid_turn_direction = (
-                                lidar_status["turn_direction"]
-                                or args.turn_direction
-                            )
-                        avoiding = True
-                        clear_frames = 0
-                    elif avoiding:
-                        clear_frames += 1
-                        if clear_frames >= args.clear_frames:
-                            avoiding = False
-                            clear_frames = 0
-
-                blocking = blocking_now
+                navigation = (
+                    bypass_controller.update(lidar_status, camera_blocking)
+                    if walking_enabled
+                    else {"mode": "forward", "steering": 0.0}
+                )
+                navigation_mode = navigation["mode"]
+                steering = navigation["steering"]
+                bypass_status = bypass_controller.status()
+                lidar_status["bypass"] = bypass_status
+                lidar_status["steering"] = round(steering, 3)
+                blocking = (
+                    camera_blocking
+                    or lidar_blocking
+                    or lidar_unavailable
+                    or bypass_status["phase"] != "cruise"
+                )
                 if not walking_enabled:
                     motion = "stopped" if home_pose is not None else "disengaged"
-                elif lidar_unavailable:
-                    motion = "stopped_lidar_unavailable"
-                elif avoiding:
-                    motion = f"turning_{avoid_turn_direction}"
+                elif navigation_mode.startswith("stopped_"):
+                    motion = navigation_mode
+                elif navigation_mode == "veer_out":
+                    motion = f"veering_{bypass_status['bypass_side']}"
+                elif navigation_mode == "follow_side":
+                    motion = f"passing_{bypass_status['bypass_side']}"
+                elif navigation_mode == "return_heading":
+                    motion = "merging_to_original_heading"
                 else:
                     motion = "walking_forward"
                 status_printer.print(
@@ -655,15 +846,12 @@ def main():
 
                 if not walking_enabled:
                     continue
-                if lidar_unavailable:
+                if navigation_mode.startswith("stopped_"):
                     walk.hold_standing_pose(home_pose, autonomous_attitude())
                     time.sleep(0.05)
                     continue
 
-                direction = (
-                    (-3 if avoid_turn_direction == "left" else 3)
-                    if avoiding else 1
-                )
+                direction = 1 if navigation_mode == "forward" else 4
                 stance_tripod = (
                     walk.TRIPOD_B if next_swing == walk.TRIPOD_A else walk.TRIPOD_A
                 )
@@ -672,12 +860,17 @@ def main():
                     next_swing,
                     stance_tripod,
                     direction=direction,
-                    hip_swing_scale=args.turn_scale if avoiding else 1.0,
+                    steering=steering,
+                    hip_swing_scale=1.0,
                     interpolation_steps=args.walk_steps,
                     frame_delay=args.walk_frame_delay,
                     attitude_provider=lambda: autonomous_attitude(direction),
                 )
                 next_swing = stance_tripod
+                bypass_controller.completed_half_cycle(
+                    steering,
+                    walk.WALK_STEER_YAW_DEG_PER_HALF_CYCLE,
+                )
     except KeyboardInterrupt:
         print("\nCtrl+C: quitting and disengaging.")
         return 0
