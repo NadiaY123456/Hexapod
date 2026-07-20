@@ -64,6 +64,7 @@ SIDE_MISSING_CYCLES = 4
 FOLLOW_HEADING_DIVISOR_DEG = 20.0
 FOLLOW_HEADING_MAX_FRACTION = 0.60
 MPU_YAW_SIGN_CALIBRATION_DEG = 1.0
+MPU_HEADING_SETTLE_CYCLES = 3
 TRACK_CLUSTER_MAX_ANGLE_GAP_DEG = 7.0
 TRACK_CLUSTER_MAX_POINT_GAP_M = 0.28
 TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.45
@@ -624,7 +625,8 @@ body{margin:0;background:#091015;color:#e5edf3;font:14px system-ui,sans-serif}he
 const camera=document.querySelector('#camera'),canvas=document.querySelector('#lidar'),ctx=canvas.getContext('2d'),statusEl=document.querySelector('#status'),details=document.querySelector('#details');
 function draw(data){const lidar=data.lidar||{},pts=lidar.points||[],bypass=lidar.bypass||{},track=bypass.tracked_obstacle||{},w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=Math.min(w,h)*.44,max=2500;ctx.clearRect(0,0,w,h);ctx.strokeStyle='#29404f';ctx.fillStyle='#8aa0ae';ctx.font='13px system-ui';ctx.textAlign='center';for(let i=1;i<=5;i++){ctx.beginPath();ctx.arc(cx,cy,r*i/5,0,Math.PI*2);ctx.stroke();ctx.fillText((max*i/5000).toFixed(1)+'m',cx+4,cy-r*i/5+15)}ctx.beginPath();ctx.moveTo(cx-r,cy);ctx.lineTo(cx+r,cy);ctx.moveTo(cx,cy-r);ctx.lineTo(cx,cy+r);ctx.stroke();ctx.fillStyle='#44c7e8';for(const p of pts){const a=p.relative_angle_deg*Math.PI/180,d=Math.min(p.distance_mm/max,1)*r,x=cx+Math.sin(a)*d,y=cy-Math.cos(a)*d;ctx.beginPath();ctx.arc(x,y,2.5,0,Math.PI*2);ctx.fill()}if(track.locked&&track.angle_deg!=null&&track.distance_m!=null){const a=track.angle_deg*Math.PI/180,d=Math.min(track.distance_m*1000/max,1)*r,x=cx+Math.sin(a)*d,y=cy-Math.cos(a)*d;ctx.strokeStyle='#ff9f43';ctx.fillStyle='#ff9f43';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();ctx.beginPath();ctx.arc(x,y,10,0,Math.PI*2);ctx.fill();ctx.lineWidth=1}statusEl.textContent=(data.motion||'unknown')+' | camera '+(data.camera_live?'live':'waiting')+' | lidar '+(lidar.live?'live':'stale')+' | target '+(track.locked?'LOCKED':'none');details.textContent=`motion: ${data.motion||'unknown'}\nsteering: ${Number(data.steering||0).toFixed(2)}\nphase: ${bypass.phase||'cruise'}\ntarget bearing: ${track.angle_deg==null?'--':track.angle_deg+' deg'}\ntarget range: ${track.distance_m==null?'--':track.distance_m+' m'}\nside clearance: ${track.lateral_m==null?'--':track.lateral_m+' m'}\ntarget scan points: ${track.point_count||0}\nmissed scans: ${track.missing_cycles||0}`;}
 function drawLockedPoints(data){const track=(((data.lidar||{}).bypass||{}).tracked_obstacle||{}),points=track.points||[],w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=Math.min(w,h)*.44,max=2500;ctx.fillStyle='#ff9f43';for(const p of points){const a=p.relative_angle_deg*Math.PI/180,d=Math.min(p.distance_mm/max,1)*r,x=cx+Math.sin(a)*d,y=cy-Math.cos(a)*d;ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.fill()}}
-async function update(){try{const response=await fetch('/state',{cache:'no-store'}),data=await response.json();draw(data);drawLockedPoints(data);camera.src='/camera.jpg?t='+Date.now()}catch(error){statusEl.textContent='Dashboard disconnected'}}setInterval(update,200);update();
+function drawMpuHeading(data){const bypass=((data.lidar||{}).bypass||{}),value=v=>v==null?'--':Number(v).toFixed(1)+' deg';details.textContent+=`\nMPU start yaw: ${value(bypass.bypass_start_yaw_deg)}\nMPU current yaw: ${value(bypass.current_yaw_deg)}\nMPU yaw error: ${value(bypass.raw_mpu_heading_error_deg)}\norientation settle: ${bypass.heading_settle_cycles||0}/${3}`}
+async function update(){try{const response=await fetch('/state',{cache:'no-store'}),data=await response.json();draw(data);drawLockedPoints(data);drawMpuHeading(data);camera.src='/camera.jpg?t='+Date.now()}catch(error){statusEl.textContent='Dashboard disconnected'}}setInterval(update,200);update();
 </script></body></html>"""
 
 
@@ -735,6 +737,10 @@ class ObstacleBypassController:
         self.start_yaw_deg = None
         self.current_yaw_deg = None
         self.mpu_yaw_sign = None
+        self.raw_mpu_heading_error_deg = None
+        self.mpu_heading_required = False
+        self.mpu_heading_live = False
+        self.heading_settle_cycles = 0
         self.heading_source = "commanded"
         self.phase_cycles = 0
         self.side_missing_cycles = 0
@@ -763,6 +769,10 @@ class ObstacleBypassController:
             self.start_yaw_deg = current_yaw_deg
             self.current_yaw_deg = current_yaw_deg
             self.mpu_yaw_sign = None
+            self.raw_mpu_heading_error_deg = None
+            self.mpu_heading_required = current_yaw_deg is not None
+            self.mpu_heading_live = current_yaw_deg is not None
+            self.heading_settle_cycles = 0
             self.heading_source = "commanded"
         self.phase_cycles = 0
         self.side_missing_cycles = 0
@@ -781,11 +791,15 @@ class ObstacleBypassController:
     def _update_heading(self, current_yaw_deg):
         if self.phase == "cruise":
             return
+        self.mpu_heading_live = (
+            self.start_yaw_deg is not None and current_yaw_deg is not None
+        )
         if self.start_yaw_deg is not None and current_yaw_deg is not None:
             self.current_yaw_deg = current_yaw_deg
             raw_yaw_error_deg = signed_lidar_angle(
                 current_yaw_deg - self.start_yaw_deg
             )
+            self.raw_mpu_heading_error_deg = raw_yaw_error_deg
             if (
                 self.mpu_yaw_sign is None
                 and abs(raw_yaw_error_deg) >= MPU_YAW_SIGN_CALIBRATION_DEG
@@ -905,6 +919,7 @@ class ObstacleBypassController:
         self.phase_cycles = 0
         self.side_missing_cycles = 0
         self.side_passed_cycles = 0
+        self.heading_settle_cycles = 0
         self.last_steering = self._heading_steering()
         return {"mode": "return_heading", "steering": self.last_steering}
 
@@ -1017,6 +1032,7 @@ class ObstacleBypassController:
 
         if self.phase == "return_heading":
             if obstacle_ahead:
+                self.heading_settle_cycles = 0
                 self._start_bypass(
                     lidar_status,
                     current_yaw_deg=current_yaw_deg,
@@ -1024,9 +1040,30 @@ class ObstacleBypassController:
                 )
                 self.last_steering = self._away_steering()
                 return {"mode": "veer_out", "steering": self.last_steering}
-            if abs(self.heading_error_deg) <= self.heading_tolerance_deg:
+
+            if self.mpu_heading_required and not self.mpu_heading_live:
+                self.last_steering = 0.0
+                return {
+                    "mode": "stopped_mpu_heading_unavailable",
+                    "steering": 0.0,
+                }
+
+            completion_error_deg = (
+                self.raw_mpu_heading_error_deg
+                if self.mpu_heading_required
+                else self.heading_error_deg
+            )
+            if abs(completion_error_deg) <= self.heading_tolerance_deg:
+                self.heading_settle_cycles += 1
+                self.last_steering = 0.0
+                if self.heading_settle_cycles < MPU_HEADING_SETTLE_CYCLES:
+                    return {
+                        "mode": "stopped_orientation_settling",
+                        "steering": 0.0,
+                    }
                 self.reset(camera_rearm_required=camera_blocking)
                 return {"mode": "forward", "steering": 0.0}
+            self.heading_settle_cycles = 0
             self.last_steering = self._heading_steering()
             return {"mode": "return_heading", "steering": self.last_steering}
 
@@ -1061,6 +1098,10 @@ class ObstacleBypassController:
                 if self.last_side_angle_deg is not None else None
             ),
             "estimated_heading_error_deg": round(self.heading_error_deg, 1),
+            "raw_mpu_heading_error_deg": (
+                round(self.raw_mpu_heading_error_deg, 1)
+                if self.raw_mpu_heading_error_deg is not None else None
+            ),
             "heading_source": self.heading_source,
             "bypass_start_yaw_deg": (
                 round(self.start_yaw_deg, 1)
@@ -1071,6 +1112,9 @@ class ObstacleBypassController:
                 if self.current_yaw_deg is not None else None
             ),
             "mpu_yaw_sign": self.mpu_yaw_sign,
+            "mpu_heading_required": self.mpu_heading_required,
+            "mpu_heading_live": self.mpu_heading_live,
+            "heading_settle_cycles": self.heading_settle_cycles,
             "steering_command": round(self.last_steering, 3),
             "wrap_countersteer_cycles": self.wrap_countersteer_cycles,
             "tracked_obstacle": self.tracker.status(),
@@ -1536,7 +1580,11 @@ def main():
     def current_heading_yaw():
         if leveler is None or not leveler.enabled:
             return None
-        leveler.attitude()
+        # Navigation decisions need the yaw after the completed gait cycle,
+        # not a sample cached before that movement began.
+        leveler.attitude(force=True)
+        if leveler.read_errors:
+            return None
         return leveler.yaw_degrees
 
     camera_started = False
