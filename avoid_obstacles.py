@@ -788,8 +788,8 @@ def get_args():
     parser.add_argument(
         "--bypass-distance-m",
         type=float,
-        default=0.50,
-        help="Target side distance while passing an obstacle (default: 0.50m).",
+        default=0.60,
+        help="Target side distance while passing an obstacle (default: 0.60m).",
     )
     parser.add_argument(
         "--bypass-max-steering",
