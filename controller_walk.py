@@ -6,6 +6,7 @@ import struct
 import time
 from adafruit_servokit import ServoKit
 from camera_web_stream import CameraWebStream
+from lidar_viewer import LidarWebViewer
 
 try:
     import board
@@ -269,11 +270,11 @@ LEVEL_MAX_ATTITUDE = 0.30
 LEVEL_FILTER_ALPHA = 0.78
 LEVEL_SAMPLE_INTERVAL = 0.05
 # Sample leveling once per tripod transfer so normal mid-step rocking does not
-# become feedback. These scales are about one third of the previous moving
-# correction, with a separate cap of roughly one degree at the leg joints.
-TRIPOD_LEVEL_ROLL_SCALE = 0.20
-TRIPOD_LEVEL_PITCH_SCALE = 0.18
-TRIPOD_LEVEL_FORWARD_PITCH_SCALE = 0.22
+# become feedback. Use 40% of the filtered correction, with a separate cap of
+# roughly one degree at the leg joints.
+TRIPOD_LEVEL_ROLL_SCALE = 0.40
+TRIPOD_LEVEL_PITCH_SCALE = 0.40
+TRIPOD_LEVEL_FORWARD_PITCH_SCALE = 0.40
 TRIPOD_LEVEL_MAX_ATTITUDE = 0.06
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
@@ -1828,6 +1829,19 @@ def parse_args():
     parser.add_argument("--camera-fps", type=float, default=20.0)
     parser.add_argument("--camera-hflip", action="store_true")
     parser.add_argument("--camera-vflip", action="store_true")
+    parser.add_argument(
+        "--no-lidar-view",
+        action="store_true",
+        help="Do not start the RPLIDAR terminal telemetry and browser view.",
+    )
+    parser.add_argument(
+        "--lidar-device",
+        help="C1 serial device; auto-detects /dev/ttyUSB* by default.",
+    )
+    parser.add_argument("--lidar-host", default="0.0.0.0")
+    parser.add_argument("--lidar-port", type=int, default=8001)
+    parser.add_argument("--lidar-max-range-m", type=float, default=12.0)
+    parser.add_argument("--lidar-print-interval", type=float, default=1.0)
     args = parser.parse_args()
     if not 1 <= args.camera_port <= 65535:
         parser.error("camera-port must be between 1 and 65535")
@@ -1839,6 +1853,18 @@ def parse_args():
         parser.error("camera-width and camera-height must be even numbers")
     if not 1.0 <= args.camera_fps <= 60.0:
         parser.error("camera-fps must be between 1 and 60")
+    if not 1 <= args.lidar_port <= 65535:
+        parser.error("lidar-port must be between 1 and 65535")
+    if (
+        not args.no_camera_stream
+        and not args.no_lidar_view
+        and args.camera_port == args.lidar_port
+    ):
+        parser.error("camera-port and lidar-port must be different")
+    if args.lidar_max_range_m <= 0.0:
+        parser.error("lidar-max-range-m must be positive")
+    if args.lidar_print_interval < 0.0:
+        parser.error("lidar-print-interval cannot be negative")
     return args
 
 
@@ -1883,6 +1909,7 @@ def main():
     args = parse_args()
     validate_ik_constants()
     camera_stream = None
+    lidar_viewer = None
 
     try:
         if not args.no_camera_stream:
@@ -1903,6 +1930,21 @@ def main():
                 print("Continuing with controller walking without video.")
                 camera_stream = None
 
+        if not args.no_lidar_view:
+            lidar_viewer = LidarWebViewer(
+                host=args.lidar_host,
+                port=args.lidar_port,
+                device=args.lidar_device,
+                max_range_m=args.lidar_max_range_m,
+                print_interval=args.lidar_print_interval,
+            )
+            try:
+                print(f"Lidar view: {lidar_viewer.start()}")
+            except Exception as error:
+                print(f"Lidar viewer unavailable: {error}")
+                print("Continuing with controller walking without lidar telemetry.")
+                lidar_viewer = None
+
         walk_home_pose = run_stand_up_sequence()
 
         if CONTROLLER_WALK_AFTER_STAND:
@@ -1921,6 +1963,11 @@ def main():
     except KeyboardInterrupt:
         print("Stopped by user.")
     finally:
+        try:
+            if lidar_viewer is not None:
+                lidar_viewer.stop()
+        except Exception as error:
+            print(f"Lidar viewer shutdown failed: {error}")
         try:
             if camera_stream is not None:
                 camera_stream.stop()
