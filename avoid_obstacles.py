@@ -60,6 +60,7 @@ SIDE_PASSED_CYCLES = 2
 SIDE_MISSING_CYCLES = 4
 FOLLOW_HEADING_DIVISOR_DEG = 20.0
 FOLLOW_HEADING_MAX_FRACTION = 0.60
+MPU_YAW_SIGN_CALIBRATION_DEG = 1.0
 
 
 def signed_lidar_angle(angle):
@@ -363,6 +364,11 @@ class ObstacleBypassController:
         self.phase = "cruise"
         self.bypass_side = None
         self.heading_error_deg = 0.0
+        self.commanded_heading_error_deg = 0.0
+        self.start_yaw_deg = None
+        self.current_yaw_deg = None
+        self.mpu_yaw_sign = None
+        self.heading_source = "commanded"
         self.phase_cycles = 0
         self.side_missing_cycles = 0
         self.side_passed_cycles = 0
@@ -371,18 +377,58 @@ class ObstacleBypassController:
         self.last_distance_error_m = None
         self.last_steering = 0.0
 
-    def _start_bypass(self, lidar_status):
+    def _start_bypass(
+        self,
+        lidar_status,
+        current_yaw_deg=None,
+        preserve_heading=False,
+    ):
         self.phase = "veer_out"
         self.bypass_side = (
             lidar_status.get("turn_direction") or self.fallback_direction
         )
-        self.heading_error_deg = 0.0
+        if not preserve_heading:
+            self.heading_error_deg = 0.0
+            self.commanded_heading_error_deg = 0.0
+            self.start_yaw_deg = current_yaw_deg
+            self.current_yaw_deg = current_yaw_deg
+            self.mpu_yaw_sign = None
+            self.heading_source = "commanded"
         self.phase_cycles = 0
         self.side_missing_cycles = 0
         self.side_passed_cycles = 0
         self.filtered_side_distance_m = None
         self.last_side_angle_deg = None
         self.last_distance_error_m = None
+
+    def _update_heading(self, current_yaw_deg):
+        if self.phase == "cruise":
+            return
+        if self.start_yaw_deg is not None and current_yaw_deg is not None:
+            self.current_yaw_deg = current_yaw_deg
+            raw_yaw_error_deg = signed_lidar_angle(
+                current_yaw_deg - self.start_yaw_deg
+            )
+            if (
+                self.mpu_yaw_sign is None
+                and abs(raw_yaw_error_deg) >= MPU_YAW_SIGN_CALIBRATION_DEG
+                and abs(self.commanded_heading_error_deg)
+                >= MPU_YAW_SIGN_CALIBRATION_DEG
+            ):
+                self.mpu_yaw_sign = (
+                    1.0
+                    if raw_yaw_error_deg * self.commanded_heading_error_deg > 0.0
+                    else -1.0
+                )
+            if self.mpu_yaw_sign is not None:
+                self.heading_error_deg = raw_yaw_error_deg * self.mpu_yaw_sign
+                self.heading_source = "mpu6050"
+            else:
+                self.heading_error_deg = self.commanded_heading_error_deg
+                self.heading_source = "commanded"
+        else:
+            self.heading_error_deg = self.commanded_heading_error_deg
+            self.heading_source = "commanded"
 
     def _away_steering(self):
         return -self.max_steering if self.bypass_side == "left" else self.max_steering
@@ -467,8 +513,9 @@ class ObstacleBypassController:
         self.last_steering = self._heading_steering()
         return {"mode": "return_heading", "steering": self.last_steering}
 
-    def update(self, lidar_status, camera_blocking):
+    def update(self, lidar_status, camera_blocking, current_yaw_deg=None):
         """Return a motion mode and steering command for the next half-cycle."""
+        self._update_heading(current_yaw_deg)
         if not lidar_status["live"]:
             self.last_steering = 0.0
             return {"mode": "stopped_lidar_unavailable", "steering": 0.0}
@@ -483,7 +530,7 @@ class ObstacleBypassController:
             if not (lidar_ahead or camera_blocking):
                 self.last_steering = 0.0
                 return {"mode": "forward", "steering": 0.0}
-            self._start_bypass(lidar_status)
+            self._start_bypass(lidar_status, current_yaw_deg=current_yaw_deg)
 
         # The camera starts a bypass, but lidar owns it afterward. Otherwise a
         # large bounding box still visible at the image edge repeatedly forces
@@ -546,7 +593,11 @@ class ObstacleBypassController:
 
         if self.phase == "return_heading":
             if obstacle_ahead:
-                self._start_bypass(lidar_status)
+                self._start_bypass(
+                    lidar_status,
+                    current_yaw_deg=current_yaw_deg,
+                    preserve_heading=True,
+                )
                 self.last_steering = self._away_steering()
                 return {"mode": "veer_out", "steering": self.last_steering}
             if abs(self.heading_error_deg) <= self.heading_tolerance_deg:
@@ -561,7 +612,9 @@ class ObstacleBypassController:
     def completed_half_cycle(self, steering, yaw_deg_per_half_cycle):
         """Update commanded-heading estimate after a completed gait half-cycle."""
         if self.phase != "cruise":
-            self.heading_error_deg += steering * yaw_deg_per_half_cycle
+            self.commanded_heading_error_deg += steering * yaw_deg_per_half_cycle
+            if self.heading_source != "mpu6050":
+                self.heading_error_deg = self.commanded_heading_error_deg
             self.phase_cycles += 1
 
     def status(self):
@@ -582,6 +635,16 @@ class ObstacleBypassController:
                 if self.last_side_angle_deg is not None else None
             ),
             "estimated_heading_error_deg": round(self.heading_error_deg, 1),
+            "heading_source": self.heading_source,
+            "bypass_start_yaw_deg": (
+                round(self.start_yaw_deg, 1)
+                if self.start_yaw_deg is not None else None
+            ),
+            "current_yaw_deg": (
+                round(self.current_yaw_deg, 1)
+                if self.current_yaw_deg is not None else None
+            ),
+            "mpu_yaw_sign": self.mpu_yaw_sign,
             "steering_command": round(self.last_steering, 3),
         }
 
@@ -725,8 +788,8 @@ def get_args():
     parser.add_argument(
         "--bypass-distance-m",
         type=float,
-        default=0.65,
-        help="Target side distance while passing an obstacle (default: 0.65m).",
+        default=0.50,
+        help="Target side distance while passing an obstacle (default: 0.50m).",
     )
     parser.add_argument(
         "--bypass-max-steering",
@@ -743,8 +806,8 @@ def get_args():
     parser.add_argument(
         "--bypass-heading-tolerance-deg",
         type=float,
-        default=5.0,
-        help="Heading error allowed before completing a bypass (default: 5 degrees).",
+        default=1.5,
+        help="Heading error allowed before completing a bypass (default: 1.5 degrees).",
     )
     parser.add_argument(
         "--lidar-emergency-distance-m",
@@ -797,6 +860,8 @@ def get_args():
         parser.error("bypass-heading-tolerance-deg must be between 0 and 45")
     if args.lidar_emergency_distance_m >= args.lidar_stop_distance_m:
         parser.error("lidar-emergency-distance-m must be below lidar-stop-distance-m")
+    if args.bypass_distance_m <= args.lidar_emergency_distance_m:
+        parser.error("bypass-distance-m must exceed lidar-emergency-distance-m")
     if args.clear_frames < 1 or args.walk_steps < 1:
         parser.error("clear-frames and walk-steps must be at least 1")
     if args.walk_frame_delay < 0.0 or args.print_interval < 0.0:
@@ -1004,6 +1069,12 @@ def main():
         leveler.clear_correction()
         return {"roll": 0.0, "pitch": 0.0}
 
+    def current_heading_yaw():
+        if leveler is None or not leveler.enabled:
+            return None
+        leveler.attitude()
+        return leveler.yaw_degrees
+
     camera_started = False
     try:
         print(
@@ -1075,8 +1146,13 @@ def main():
                 lidar_status = lidar_monitor.snapshot()
                 lidar_blocking = lidar_status["blocking"]
                 lidar_unavailable = not lidar_status["live"]
+                current_yaw_deg = current_heading_yaw()
                 navigation = (
-                    bypass_controller.update(lidar_status, camera_blocking)
+                    bypass_controller.update(
+                        lidar_status,
+                        camera_blocking,
+                        current_yaw_deg=current_yaw_deg,
+                    )
                     if walking_enabled
                     else {"mode": "forward", "steering": 0.0}
                 )
