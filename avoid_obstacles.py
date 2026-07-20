@@ -15,6 +15,7 @@ travel heading.
 import argparse
 import asyncio
 import json
+import math
 import os
 import select
 import sys
@@ -37,6 +38,22 @@ from ai_camera_object_detection import (
     load_labels,
     rectangle_to_box,
 )
+
+
+LIDAR_POINT_MAX_AGE_S = 0.35
+SIDE_TRACK_MIN_POINTS = 3
+SIDE_TRACK_SAMPLE_COUNT = 7
+SIDE_TRACK_MAX_RANGE_M = 2.5
+SIDE_TRACK_MIN_ANGLE_DEG = 30.0
+SIDE_TRACK_MAX_ANGLE_DEG = 150.0
+SIDE_DISTANCE_FILTER_ALPHA = 0.55
+SIDE_DISTANCE_DEADBAND_M = 0.04
+SIDE_ACQUIRE_MAX_CYCLES = 10
+SIDE_PASSED_ANGLE_DEG = 112.0
+SIDE_PASSED_CYCLES = 2
+SIDE_MISSING_CYCLES = 4
+FOLLOW_HEADING_DIVISOR_DEG = 20.0
+FOLLOW_HEADING_MAX_FRACTION = 0.60
 
 
 def signed_lidar_angle(angle):
@@ -145,7 +162,7 @@ class LidarObstacleMonitor:
             points = [
                 point.copy()
                 for point in self.points.values()
-                if now - point["seen_at"] <= 1.0
+                if now - point["seen_at"] <= LIDAR_POINT_MAX_AGE_S
             ]
         live = self.error is None and now - self.last_packet <= 1.5
 
@@ -180,23 +197,56 @@ class LidarObstacleMonitor:
                 default=12000.0,
             )
 
-        def side_distance(side):
+        def side_track(side):
             if side == "left":
                 side_points = [
                     point for point in points
-                    if -135.0 <= relative_angle(point) <= -45.0
+                    if (
+                        -SIDE_TRACK_MAX_ANGLE_DEG
+                        <= relative_angle(point)
+                        <= -SIDE_TRACK_MIN_ANGLE_DEG
+                    )
                 ]
             else:
                 side_points = [
                     point for point in points
-                    if 45.0 <= relative_angle(point) <= 135.0
+                    if (
+                        SIDE_TRACK_MIN_ANGLE_DEG
+                        <= relative_angle(point)
+                        <= SIDE_TRACK_MAX_ANGLE_DEG
+                    )
                 ]
-            if not side_points:
-                return None
-            # A median of the closest returns follows the obstacle surface but
-            # rejects a single unusually short lidar sample.
-            distances = sorted(point["distance_mm"] for point in side_points)
-            return median(distances[:5]) / 1000.0
+            samples = []
+            for point in side_points:
+                distance_m = point["distance_mm"] / 1000.0
+                if distance_m > SIDE_TRACK_MAX_RANGE_M:
+                    continue
+                angle_deg = relative_angle(point)
+                angle_rad = math.radians(angle_deg)
+                samples.append(
+                    {
+                        "angle_deg": angle_deg,
+                        "lateral_m": abs(distance_m * math.sin(angle_rad)),
+                        "forward_m": distance_m * math.cos(angle_rad),
+                    }
+                )
+            if len(samples) < SIDE_TRACK_MIN_POINTS:
+                return {"distance_m": None, "angle_deg": None, "forward_m": None}
+
+            # Use the closest surface samples and measure perpendicular
+            # clearance, not polar/slant range. This keeps the target distance
+            # stable as the same obstacle moves from front-side to rear-side.
+            tracked = sorted(samples, key=lambda sample: sample["lateral_m"])[
+                :SIDE_TRACK_SAMPLE_COUNT
+            ]
+            return {
+                "distance_m": median(sample["lateral_m"] for sample in tracked),
+                "angle_deg": median(sample["angle_deg"] for sample in tracked),
+                "forward_m": median(sample["forward_m"] for sample in tracked),
+            }
+
+        left_track = side_track("left")
+        right_track = side_track("right")
 
         turn_direction = None
         if nearest is not None:
@@ -225,8 +275,12 @@ class LidarObstacleMonitor:
                 if nearest is not None else None
             ),
             "turn_direction": turn_direction,
-            "left_distance_m": side_distance("left"),
-            "right_distance_m": side_distance("right"),
+            "left_distance_m": left_track["distance_m"],
+            "left_angle_deg": left_track["angle_deg"],
+            "left_forward_m": left_track["forward_m"],
+            "right_distance_m": right_track["distance_m"],
+            "right_angle_deg": right_track["angle_deg"],
+            "right_forward_m": right_track["forward_m"],
             "forward_half_angle_deg": self.forward_angle_deg,
             "error": str(self.error) if self.error is not None else None,
         }
@@ -258,6 +312,11 @@ class ObstacleBypassController:
         self.heading_error_deg = 0.0
         self.phase_cycles = 0
         self.side_missing_cycles = 0
+        self.side_passed_cycles = 0
+        self.filtered_side_distance_m = None
+        self.last_side_angle_deg = None
+        self.last_distance_error_m = None
+        self.last_steering = 0.0
 
     def _start_bypass(self, lidar_status):
         self.phase = "veer_out"
@@ -267,6 +326,10 @@ class ObstacleBypassController:
         self.heading_error_deg = 0.0
         self.phase_cycles = 0
         self.side_missing_cycles = 0
+        self.side_passed_cycles = 0
+        self.filtered_side_distance_m = None
+        self.last_side_angle_deg = None
+        self.last_distance_error_m = None
 
     def _away_steering(self):
         return -self.max_steering if self.bypass_side == "left" else self.max_steering
@@ -277,66 +340,167 @@ class ObstacleBypassController:
         key = "right_distance_m" if self.bypass_side == "left" else "left_distance_m"
         return lidar_status.get(key)
 
+    def _obstacle_side_angle(self, lidar_status):
+        key = "right_angle_deg" if self.bypass_side == "left" else "left_angle_deg"
+        return lidar_status.get(key)
+
+    def _side_has_passed(self, side_angle_deg):
+        if side_angle_deg is None:
+            return False
+        if self.bypass_side == "left":
+            return side_angle_deg >= SIDE_PASSED_ANGLE_DEG
+        return side_angle_deg <= -SIDE_PASSED_ANGLE_DEG
+
+    def _heading_steering(self):
+        correction = -self.heading_error_deg / FOLLOW_HEADING_DIVISOR_DEG
+        limit = self.max_steering * FOLLOW_HEADING_MAX_FRACTION
+        return max(-limit, min(limit, correction))
+
+    def _distance_steering(self, side_distance_m):
+        if side_distance_m is None:
+            self.last_distance_error_m = None
+            return 0.0
+
+        if self.filtered_side_distance_m is None:
+            self.filtered_side_distance_m = side_distance_m
+        else:
+            self.filtered_side_distance_m = (
+                SIDE_DISTANCE_FILTER_ALPHA * self.filtered_side_distance_m
+                + (1.0 - SIDE_DISTANCE_FILTER_ALPHA) * side_distance_m
+            )
+
+        distance_error = self.filtered_side_distance_m - self.target_distance_m
+        self.last_distance_error_m = distance_error
+        if abs(distance_error) <= SIDE_DISTANCE_DEADBAND_M:
+            return 0.0
+
+        effective_error = math.copysign(
+            abs(distance_error) - SIDE_DISTANCE_DEADBAND_M,
+            distance_error,
+        )
+        toward_obstacle_sign = 1.0 if self.bypass_side == "left" else -1.0
+        return (
+            toward_obstacle_sign
+            * self.follow_gain
+            * effective_error
+            / self.target_distance_m
+        )
+
+    def _follow_steering(self, side_distance_m):
+        distance_steering = self._distance_steering(side_distance_m)
+        heading_steering = self._heading_steering()
+        if distance_steering * heading_steering < 0.0:
+            # Clearance wins over heading. In particular, never let the merge
+            # correction steer toward an obstacle that is already too close.
+            if (
+                self.last_distance_error_m is not None
+                and self.last_distance_error_m < -SIDE_DISTANCE_DEADBAND_M
+            ):
+                heading_steering = 0.0
+            else:
+                heading_steering *= 0.35
+        correction = distance_steering + heading_steering
+        self.last_steering = max(
+            -self.max_steering,
+            min(self.max_steering, correction),
+        )
+        return self.last_steering
+
+    def _return_heading(self):
+        self.phase = "return_heading"
+        self.phase_cycles = 0
+        self.side_missing_cycles = 0
+        self.side_passed_cycles = 0
+        self.last_steering = self._heading_steering()
+        return {"mode": "return_heading", "steering": self.last_steering}
+
     def update(self, lidar_status, camera_blocking):
         """Return a motion mode and steering command for the next half-cycle."""
         if not lidar_status["live"]:
+            self.last_steering = 0.0
             return {"mode": "stopped_lidar_unavailable", "steering": 0.0}
 
         nearest_m = lidar_status.get("nearest_m")
         if nearest_m is not None and nearest_m <= self.emergency_distance_m:
+            self.last_steering = 0.0
             return {"mode": "stopped_emergency", "steering": 0.0}
 
-        obstacle_ahead = lidar_status["blocking"] or camera_blocking
+        lidar_ahead = lidar_status["blocking"]
         if self.phase == "cruise":
-            if not obstacle_ahead:
+            if not (lidar_ahead or camera_blocking):
+                self.last_steering = 0.0
                 return {"mode": "forward", "steering": 0.0}
             self._start_bypass(lidar_status)
+
+        # The camera starts a bypass, but lidar owns it afterward. Otherwise a
+        # large bounding box still visible at the image edge repeatedly forces
+        # a full turn-away command and makes the robot orbit the obstacle.
+        obstacle_ahead = lidar_ahead
 
         if self.phase == "veer_out":
             side_distance = self._obstacle_side_distance(lidar_status)
             if not obstacle_ahead and side_distance is not None and self.phase_cycles >= 2:
                 self.phase = "follow_side"
                 self.phase_cycles = 0
-            elif not obstacle_ahead and side_distance is None and self.phase_cycles >= 4:
-                self.phase = "return_heading"
-                self.phase_cycles = 0
-            return {"mode": "veer_out", "steering": self._away_steering()}
+                self.last_side_angle_deg = self._obstacle_side_angle(lidar_status)
+                return {
+                    "mode": "follow_side",
+                    "steering": self._follow_steering(side_distance),
+                }
+            elif (
+                not obstacle_ahead
+                and side_distance is None
+                and self.phase_cycles >= SIDE_ACQUIRE_MAX_CYCLES
+            ):
+                return self._return_heading()
+            self.last_steering = self._away_steering()
+            return {"mode": "veer_out", "steering": self.last_steering}
 
         if self.phase == "follow_side":
             if obstacle_ahead:
                 self.side_missing_cycles = 0
-                return {"mode": "follow_side", "steering": self._away_steering()}
+                self.side_passed_cycles = 0
+                self.last_steering = self._away_steering()
+                return {"mode": "follow_side", "steering": self.last_steering}
 
             side_distance = self._obstacle_side_distance(lidar_status)
+            side_angle = self._obstacle_side_angle(lidar_status)
             if side_distance is None:
                 self.side_missing_cycles += 1
-                if self.side_missing_cycles >= 3:
-                    self.phase = "return_heading"
-                    self.phase_cycles = 0
-                return {"mode": "follow_side", "steering": 0.0}
+                if self.side_missing_cycles >= SIDE_MISSING_CYCLES:
+                    return self._return_heading()
+                # Preserve the previous distance estimate through short scan
+                # gaps while still straightening toward the original heading.
+                return {
+                    "mode": "follow_side",
+                    "steering": self._follow_steering(
+                        self.filtered_side_distance_m
+                    ),
+                }
 
             self.side_missing_cycles = 0
-            distance_error = side_distance - self.target_distance_m
-            toward_obstacle_sign = 1.0 if self.bypass_side == "left" else -1.0
-            correction = (
-                toward_obstacle_sign
-                * self.follow_gain
-                * distance_error
-                / self.target_distance_m
-            )
-            steering = max(-self.max_steering, min(self.max_steering, correction))
-            return {"mode": "follow_side", "steering": steering}
+            self.last_side_angle_deg = side_angle
+            if self._side_has_passed(side_angle):
+                self.side_passed_cycles += 1
+                if self.side_passed_cycles >= SIDE_PASSED_CYCLES:
+                    return self._return_heading()
+            else:
+                self.side_passed_cycles = 0
+            return {
+                "mode": "follow_side",
+                "steering": self._follow_steering(side_distance),
+            }
 
         if self.phase == "return_heading":
             if obstacle_ahead:
                 self._start_bypass(lidar_status)
-                return {"mode": "veer_out", "steering": self._away_steering()}
+                self.last_steering = self._away_steering()
+                return {"mode": "veer_out", "steering": self.last_steering}
             if abs(self.heading_error_deg) <= self.heading_tolerance_deg:
                 self.reset()
                 return {"mode": "forward", "steering": 0.0}
-            correction = -self.heading_error_deg / 25.0
-            steering = max(-self.max_steering, min(self.max_steering, correction))
-            return {"mode": "return_heading", "steering": steering}
+            self.last_steering = self._heading_steering()
+            return {"mode": "return_heading", "steering": self.last_steering}
 
         self.reset()
         return {"mode": "forward", "steering": 0.0}
@@ -352,7 +516,20 @@ class ObstacleBypassController:
             "phase": self.phase,
             "bypass_side": self.bypass_side,
             "target_side_distance_m": self.target_distance_m,
+            "measured_side_distance_m": (
+                round(self.filtered_side_distance_m, 3)
+                if self.filtered_side_distance_m is not None else None
+            ),
+            "side_distance_error_m": (
+                round(self.last_distance_error_m, 3)
+                if self.last_distance_error_m is not None else None
+            ),
+            "tracked_side_angle_deg": (
+                round(self.last_side_angle_deg, 1)
+                if self.last_side_angle_deg is not None else None
+            ),
             "estimated_heading_error_deg": round(self.heading_error_deg, 1),
+            "steering_command": round(self.last_steering, 3),
         }
 
 
