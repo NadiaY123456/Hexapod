@@ -360,7 +360,7 @@ class ObstacleBypassController:
         self.fallback_direction = fallback_direction
         self.reset()
 
-    def reset(self):
+    def reset(self, camera_rearm_required=False):
         self.phase = "cruise"
         self.bypass_side = None
         self.heading_error_deg = 0.0
@@ -376,6 +376,7 @@ class ObstacleBypassController:
         self.last_side_angle_deg = None
         self.last_distance_error_m = None
         self.last_steering = 0.0
+        self.camera_rearm_required = camera_rearm_required
 
     def _start_bypass(
         self,
@@ -400,6 +401,7 @@ class ObstacleBypassController:
         self.filtered_side_distance_m = None
         self.last_side_angle_deg = None
         self.last_distance_error_m = None
+        self.camera_rearm_required = True
 
     def _update_heading(self, current_yaw_deg):
         if self.phase == "cruise":
@@ -525,9 +527,16 @@ class ObstacleBypassController:
             self.last_steering = 0.0
             return {"mode": "stopped_emergency", "steering": 0.0}
 
+        # A camera box can remain visible for several frames after the lidar
+        # has confirmed that the robot passed the obstacle. Require one clear
+        # camera reading before that visual detection may start another bypass.
+        if not camera_blocking:
+            self.camera_rearm_required = False
+
         lidar_ahead = lidar_status["blocking"]
+        camera_can_trigger = camera_blocking and not self.camera_rearm_required
         if self.phase == "cruise":
-            if not (lidar_ahead or camera_blocking):
+            if not (lidar_ahead or camera_can_trigger):
                 self.last_steering = 0.0
                 return {"mode": "forward", "steering": 0.0}
             self._start_bypass(lidar_status, current_yaw_deg=current_yaw_deg)
@@ -601,7 +610,7 @@ class ObstacleBypassController:
                 self.last_steering = self._away_steering()
                 return {"mode": "veer_out", "steering": self.last_steering}
             if abs(self.heading_error_deg) <= self.heading_tolerance_deg:
-                self.reset()
+                self.reset(camera_rearm_required=camera_blocking)
                 return {"mode": "forward", "steering": 0.0}
             self.last_steering = self._heading_steering()
             return {"mode": "return_heading", "steering": self.last_steering}
