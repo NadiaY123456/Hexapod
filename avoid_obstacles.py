@@ -41,6 +41,12 @@ from ai_camera_object_detection import (
 
 
 LIDAR_POINT_MAX_AGE_S = 0.35
+LIDAR_BAUDRATE = 460800
+LIDAR_START_ATTEMPTS = 3
+LIDAR_RETRY_DELAY_S = 0.75
+LIDAR_STOP_COMMAND = b"\xA5\x25"
+DEFAULT_CAMERA_BUFFER_COUNT = 6
+CAMERA_START_TIMEOUT_S = 5.0
 SIDE_TRACK_MIN_POINTS = 3
 SIDE_TRACK_SAMPLE_COUNT = 7
 SIDE_TRACK_MAX_RANGE_M = 2.5
@@ -73,6 +79,55 @@ def ensure_lidar_driver():
             f"  {sys.executable} -m pip install rplidarc1==0.1.3\n"
             f"Active interpreter: {sys.executable}"
         ) from error
+
+
+def stop_stale_lidar_stream(device, baudrate=LIDAR_BAUDRATE):
+    """Stop an old scan and discard bytes left in the USB serial input queue."""
+    import serial
+
+    try:
+        with serial.Serial(
+            device,
+            baudrate,
+            timeout=0.2,
+            write_timeout=0.2,
+            exclusive=True,
+        ) as port:
+            port.write(LIDAR_STOP_COMMAND)
+            port.flush()
+            time.sleep(0.10)
+            port.reset_input_buffer()
+    except (OSError, serial.SerialException) as error:
+        raise RuntimeError(
+            f"Unable to prepare RPLIDAR serial device {device}: {error}. "
+            "Confirm the device path and stop any other process using the port."
+        ) from error
+
+
+def open_lidar_with_recovery(device, baudrate=LIDAR_BAUDRATE):
+    """Open the C1, retrying health-check sync after clearing stale scan bytes."""
+    from rplidarc1 import RPLidar
+
+    for attempt in range(1, LIDAR_START_ATTEMPTS + 1):
+        stop_stale_lidar_stream(device, baudrate)
+        try:
+            return RPLidar(device, baudrate)
+        except ValueError as error:
+            if attempt == LIDAR_START_ATTEMPTS:
+                raise RuntimeError(
+                    "RPLIDAR returned an invalid health-response descriptor after "
+                    f"{LIDAR_START_ATTEMPTS} attempts. Check that --lidar-device "
+                    "selects the C1, no other process has the serial port open, and "
+                    "the USB cable and 5V supply are stable."
+                ) from error
+            print(
+                "RPLIDAR response was out of sync; clearing serial input and "
+                f"retrying ({attempt}/{LIDAR_START_ATTEMPTS}).",
+                file=sys.stderr,
+            )
+            time.sleep(LIDAR_RETRY_DELAY_S)
+
+    raise AssertionError("unreachable")
 
 
 class LidarObstacleMonitor:
@@ -114,9 +169,7 @@ class LidarObstacleMonitor:
             self.data_ready.set()
 
     async def _scan(self):
-        from rplidarc1 import RPLidar
-
-        lidar = RPLidar(self.device, 460800)
+        lidar = open_lidar_with_recovery(self.device, LIDAR_BAUDRATE)
         scan_task = asyncio.create_task(lidar.simple_scan(make_return_dict=False))
         try:
             while not self.stop_requested.is_set():
@@ -621,6 +674,12 @@ def get_args():
     parser.add_argument("--iou", type=float, default=0.65)
     parser.add_argument("--max-detections", type=int, default=10)
     parser.add_argument("--fps", type=int, help="Override camera inference frame rate.")
+    parser.add_argument(
+        "--camera-buffers",
+        type=int,
+        default=DEFAULT_CAMERA_BUFFER_COUNT,
+        help="Picamera2 request buffers (default: 6).",
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
         "--object-width-m",
@@ -748,6 +807,8 @@ def get_args():
         parser.error("camera measurements must be positive")
     if args.sensor_width_px <= 0:
         parser.error("sensor-width-px must be positive")
+    if args.camera_buffers < 3:
+        parser.error("camera-buffers must be at least 3")
     return args
 
 
@@ -821,11 +882,12 @@ def main():
     picam2 = Picamera2(imx500.camera_num)
     config = picam2.create_preview_configuration(
         controls={"FrameRate": args.fps or intrinsics.inference_rate},
-        buffer_count=12,
+        buffer_count=args.camera_buffers,
     )
     detections = []
     blocking = False
     motion = "disengaged"
+    camera_frame_ready = threading.Event()
 
     @lru_cache
     def model_labels():
@@ -895,12 +957,13 @@ def main():
                 cv2.putText(mapped.array, label, (x + 4, max(50, y + 22)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
 
+    def camera_callback(request):
+        camera_frame_ready.set()
+        if not args.headless:
+            draw_overlay(request)
+
     imx500.show_network_fw_progress_bar()
-    picam2.start(config, show_preview=not args.headless)
-    if intrinsics.preserve_aspect_ratio:
-        imx500.set_auto_aspect_ratio()
-    if not args.headless:
-        picam2.pre_callback = draw_overlay
+    picam2.pre_callback = camera_callback
 
     walk = None
     home_pose = None
@@ -941,10 +1004,29 @@ def main():
         leveler.clear_correction()
         return {"roll": 0.0, "pitch": 0.0}
 
+    camera_started = False
     try:
-        print(f"Starting RPLIDAR C1 on {args.lidar_device} at 460800 baud.")
+        print(
+            f"Starting RPLIDAR C1 on {args.lidar_device} "
+            f"at {LIDAR_BAUDRATE} baud."
+        )
         lidar_monitor.start()
         print("Lidar ready; forward path monitoring is active.")
+
+        print(f"Starting AI Camera with {args.camera_buffers} request buffers.")
+        picam2.start(config, show_preview=not args.headless)
+        camera_started = True
+        if not camera_frame_ready.wait(timeout=CAMERA_START_TIMEOUT_S):
+            raise RuntimeError(
+                "AI Camera started but produced no frames within "
+                f"{CAMERA_START_TIMEOUT_S:.0f} seconds. Run "
+                "'rpicam-hello -t 5000' outside this program; if it shows the "
+                "same V4L2/Unicam errors, reboot and check the camera cable and "
+                "Raspberry Pi camera software."
+            )
+        if intrinsics.preserve_aspect_ratio:
+            imx500.set_auto_aspect_ratio()
+
         stand_robot()
         motion = "standing"
         print("Camera ready. Robot is standing still and waiting for W.")
@@ -1061,11 +1143,26 @@ def main():
     except KeyboardInterrupt:
         print("\nCtrl+C: quitting and disengaging.")
         return 0
+    except RuntimeError as error:
+        print(f"Startup/runtime failure: {error}", file=sys.stderr)
+        return 2
     finally:
-        lidar_monitor.stop()
-        picam2.stop()
-        if walk is not None:
-            walk.release_all()
+        try:
+            lidar_monitor.stop()
+        except Exception as error:
+            print(f"Lidar shutdown failed: {error}", file=sys.stderr)
+        try:
+            if camera_started:
+                picam2.stop()
+        except Exception as error:
+            print(f"Camera shutdown failed: {error}", file=sys.stderr)
+        finally:
+            try:
+                picam2.close()
+            except Exception as error:
+                print(f"Camera close failed: {error}", file=sys.stderr)
+            if walk is not None:
+                walk.release_all()
 
 
 if __name__ == "__main__":
