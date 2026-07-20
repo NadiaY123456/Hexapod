@@ -255,6 +255,7 @@ BODY_ROLL_FOOT_DEG = 16.0
 BODY_ROLL_KNEE_DEG = -12.0
 BODY_PITCH_FOOT_DEG = 22.0
 BODY_PITCH_KNEE_DEG = -16.0
+WALK_REAR_FOOT_INWARD_LIMIT_DEG = -3.0
 MPU6050_ADDRESS = 0x68
 LEVELING_ENABLED = True
 LEVEL_ROLL_TARGET_DEG = 0.0
@@ -264,15 +265,9 @@ LEVEL_ROLL_GAIN = 0.035
 LEVEL_PITCH_GAIN = 0.035
 LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
-LEVEL_MAX_ATTITUDE = 0.45
-LEVEL_FILTER_ALPHA = 0.70
+LEVEL_MAX_ATTITUDE = 0.30
+LEVEL_FILTER_ALPHA = 0.78
 LEVEL_SAMPLE_INTERVAL = 0.05
-# Treat MPU corrections like limited virtual right-stick commands. Moving
-# correction is deliberately weaker than standing correction so a bad reading
-# cannot dominate a tripod support phase.
-LEVEL_MOVING_ROLL_SCALE = 0.65
-LEVEL_MOVING_PITCH_SCALE = 0.65
-LEVEL_FORWARD_PITCH_SCALE = 0.65
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
 MPU_READ_RETRY_DELAY = 0.008
@@ -839,6 +834,8 @@ class LevelingController:
         self.roll_degrees = 0.0
         self.pitch_degrees = 0.0
         self.yaw_degrees = 0.0
+        self.roll_target_degrees = LEVEL_ROLL_TARGET_DEG
+        self.pitch_target_degrees = LEVEL_PITCH_TARGET_DEG
         self.gyro_bias = (0.0, 0.0, 0.0)
         self.read_errors = 0
         self.last_sample_time = 0.0
@@ -865,11 +862,20 @@ class LevelingController:
             )
             self.filter.set_from_accel(accel_x, accel_y, accel_z)
             self.gyro_bias = self.calibrate_gyro()
+            (
+                self.roll_degrees,
+                self.pitch_degrees,
+                self.yaw_degrees,
+            ) = self.filter.euler_degrees()
+            self.roll_target_degrees = self.roll_degrees
+            self.pitch_target_degrees = self.pitch_degrees
             self.last_sample_time = time.monotonic()
             self.enabled = True
             print(
                 "MPU6050 Madgwick orientation enabled at "
-                f"address 0x{MPU6050_ADDRESS:02x}."
+                f"address 0x{MPU6050_ADDRESS:02x}; neutral reference "
+                f"roll={self.roll_target_degrees:.1f} deg, "
+                f"pitch={self.pitch_target_degrees:.1f} deg."
             )
         except Exception as error:
             print(f"MPU6050 leveling disabled: {error}")
@@ -978,13 +984,13 @@ class LevelingController:
 
         target_roll = tilt_to_virtual_stick(
             self.roll_degrees,
-            LEVEL_ROLL_TARGET_DEG,
+            self.roll_target_degrees,
             LEVEL_ROLL_GAIN,
             LEVEL_ROLL_SIGN,
         )
         target_pitch = tilt_to_virtual_stick(
             self.pitch_degrees,
-            LEVEL_PITCH_TARGET_DEG,
+            self.pitch_target_degrees,
             LEVEL_PITCH_GAIN,
             LEVEL_PITCH_SIGN,
         )
@@ -997,6 +1003,11 @@ class LevelingController:
         ) * target_pitch
 
         return {"roll": self.roll, "pitch": self.pitch}
+
+    def clear_correction(self):
+        """Return servo leveling output to neutral without disabling the MPU."""
+        self.roll = 0.0
+        self.pitch = 0.0
 
     def maybe_print_read_warning(self, error):
         now = time.monotonic()
@@ -1094,36 +1105,6 @@ class WalkOdometer:
             f"direction {direction_degrees:.1f} deg, "
             f"yaw {yaw:.1f} deg"
         )
-
-
-def combined_attitude(
-    manual_attitude,
-    leveler=None,
-    roll_scale=1.0,
-    pitch_scale=1.0,
-    level_attitude=None,
-):
-    if level_attitude is None:
-        level_attitude = (
-            leveler.attitude()
-            if leveler is not None
-            else {"roll": 0.0, "pitch": 0.0}
-        )
-    return {
-        "roll": clamp_unit(
-            manual_attitude.get("roll", 0.0) + level_attitude["roll"] * roll_scale
-        ),
-        "pitch": clamp_unit(
-            manual_attitude.get("pitch", 0.0)
-            + level_attitude["pitch"] * pitch_scale
-        ),
-    }
-
-
-def moving_level_scales(direction):
-    if direction in (1, 4):
-        return LEVEL_MOVING_ROLL_SCALE, LEVEL_FORWARD_PITCH_SCALE
-    return LEVEL_MOVING_ROLL_SCALE, LEVEL_MOVING_PITCH_SCALE
 
 
 def button_turn_direction(button_values):
@@ -1274,6 +1255,16 @@ def body_attitude_offsets(leg_name, attitude):
     return foot, knee
 
 
+def walking_attitude_offsets(leg_name, attitude):
+    """Limit rear-foot tuck while preserving the foot/knee correction ratio."""
+    foot, knee = body_attitude_offsets(leg_name, attitude)
+    if leg_name in ("leg1", "leg6") and foot < WALK_REAR_FOOT_INWARD_LIMIT_DEG:
+        scale = WALK_REAR_FOOT_INWARD_LIMIT_DEG / foot
+        foot *= scale
+        knee *= scale
+    return foot, knee
+
+
 def set_walk_frame(
     home_pose,
     swing_tripod,
@@ -1305,7 +1296,7 @@ def set_walk_frame(
         hip_scale = hip_motion_scale(leg_name, direction, steering)
         foot_lift = lift * WALK_LIFT_SCALE[leg_name]
         knee_lift = lift * WALK_KNEE_LIFT_SCALE[leg_name]
-        attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
+        attitude_foot, attitude_knee = walking_attitude_offsets(leg_name, attitude)
         swing_foot = home_pose[0] + attitude_foot + WALK_LIFT_FOOT_DELTA * foot_lift
         swing_knee = (
             home_pose[1]
@@ -1320,7 +1311,7 @@ def set_walk_frame(
 
     for leg_name in stance_tripod:
         hip_scale = hip_motion_scale(leg_name, direction, steering)
-        attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
+        attitude_foot, attitude_knee = walking_attitude_offsets(leg_name, attitude)
         set_leg_offsets(
             leg_name,
             home_pose[0] + attitude_foot,
@@ -1405,6 +1396,15 @@ def hold_standing_pose(home_pose, attitude=None):
     set_all_hip_offsets(0.0, delay=0.0)
 
 
+def hold_neutral_standing_pose(home_pose, manual_attitude=None, leveler=None):
+    """Hold calibrated neutral without retaining a moving MPU correction."""
+    if manual_attitude is None:
+        manual_attitude = {"roll": 0.0, "pitch": 0.0}
+    if leveler is not None:
+        leveler.clear_correction()
+    hold_standing_pose(home_pose, manual_attitude)
+
+
 def command_sit_pose(home_pose):
     print("A button: sitting.")
     set_all_hip_offsets(0.0, delay=0.0)
@@ -1459,16 +1459,9 @@ def controller_walk_half_cycle(
         )
 
         if stop_requested or posture_action is not None or not direction:
-            hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
+            hold_neutral_standing_pose(home_pose, attitude, leveler)
             return direction, steering, stop_requested, posture_action, False
 
-        walk_roll_scale, walk_pitch_scale = moving_level_scales(direction)
-        active_attitude = combined_attitude(
-            attitude,
-            leveler,
-            roll_scale=walk_roll_scale,
-            pitch_scale=walk_pitch_scale,
-        )
         set_walk_frame(
             home_pose,
             swing_tripod,
@@ -1476,7 +1469,7 @@ def controller_walk_half_cycle(
             step / WALK_HALF_CYCLE_STEPS,
             direction=direction,
             steering=steering,
-            attitude=active_attitude,
+            attitude=attitude,
         )
         speed_scale = movement_speed_scale(controller, direction)
         time.sleep(WALK_FRAME_DELAY / speed_scale)
@@ -1591,10 +1584,7 @@ def controller_walk_control(home_pose, device_path):
                         )
                         last_reported_attitude = attitude_snapshot
                     if not direction:
-                        hold_standing_pose(
-                            home_pose,
-                            combined_attitude(attitude, leveler),
-                        )
+                        hold_neutral_standing_pose(home_pose, attitude, leveler)
 
             if stop_requested:
                 direction = 0
@@ -1630,10 +1620,7 @@ def controller_walk_control(home_pose, device_path):
 
             if movement_locked:
                 if not is_centered:
-                    hold_standing_pose(
-                        home_pose,
-                        combined_attitude(attitude, leveler),
-                    )
+                    hold_neutral_standing_pose(home_pose, attitude, leveler)
                     is_centered = True
 
                 if movement_controls_centered(
@@ -1684,7 +1671,7 @@ def controller_walk_control(home_pose, device_path):
                     last_reported_steering = 0.0
 
             if not direction:
-                hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
+                hold_neutral_standing_pose(home_pose, attitude, leveler)
                 is_centered = True
                 time.sleep(0.02)
                 continue
@@ -1741,7 +1728,7 @@ def controller_walk_control(home_pose, device_path):
                 continue
 
             if not direction:
-                hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
+                hold_neutral_standing_pose(home_pose, attitude, leveler)
                 is_centered = True
                 if last_reported_direction not in (None, 0):
                     print("Controller direction: paused")
@@ -1752,10 +1739,11 @@ def controller_walk_control(home_pose, device_path):
             if cycle_complete:
                 odometer.add_completed_half_cycle(direction, steering, leveler)
                 leveler.print_angles("MPU6050 ground-contact angle", force=True)
+                leveler.clear_correction()
                 next_swing = stance_tripod
 
     odometer.print_report(leveler)
-    hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
+    hold_neutral_standing_pose(home_pose, attitude, leveler)
 
 
 def parse_args():

@@ -531,7 +531,6 @@ def get_args():
     parser.add_argument("--turn-scale", type=float, default=0.50)
     parser.add_argument("--walk-steps", type=int, default=7)
     parser.add_argument("--walk-frame-delay", type=float, default=0.022)
-    parser.add_argument("--leveling-scale", type=float, default=0.65)
     parser.add_argument("--print-interval", type=float, default=0.25)
     parser.add_argument("--focal-length-mm", type=float, default=AI_CAMERA_FOCAL_LENGTH_MM)
     parser.add_argument("--pixel-pitch-um", type=float, default=AI_CAMERA_PIXEL_PITCH_UM)
@@ -568,8 +567,6 @@ def get_args():
         parser.error("walk-frame-delay and print-interval cannot be negative")
     if not 0.0 < args.turn_scale <= 1.0:
         parser.error("turn-scale must be within 0..1")
-    if not 0.0 <= args.leveling_scale <= 1.0:
-        parser.error("leveling-scale must be within 0..1")
     if args.focal_length_mm <= 0.0 or args.pixel_pitch_um <= 0.0:
         parser.error("camera measurements must be positive")
     if args.sensor_width_px <= 0:
@@ -763,12 +760,9 @@ def main():
         next_swing = walk.TRIPOD_A
 
     def autonomous_attitude(direction=0):
-        level_attitude = leveler.attitude()
-        roll_scale, pitch_scale = walk.moving_level_scales(direction)
-        return {
-            "roll": level_attitude["roll"] * roll_scale * args.leveling_scale,
-            "pitch": level_attitude["pitch"] * pitch_scale * args.leveling_scale,
-        }
+        leveler.attitude()
+        leveler.clear_correction()
+        return {"roll": 0.0, "pitch": 0.0}
 
     try:
         print(f"Starting RPLIDAR C1 on {args.lidar_device} at 460800 baud.")
@@ -886,6 +880,7 @@ def main():
                     steering,
                     walk.WALK_STEER_YAW_DEG_PER_HALF_CYCLE,
                 )
+                leveler.clear_correction()
     except KeyboardInterrupt:
         print("\nCtrl+C: quitting and disengaging.")
         return 0
