@@ -18,12 +18,14 @@ import json
 import math
 import os
 import select
+import socket
 import sys
 import termios
 import threading
 import time
 import tty
 from functools import lru_cache
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from statistics import median
 
 from ai_camera_object_detection import (
@@ -46,6 +48,7 @@ LIDAR_START_ATTEMPTS = 3
 LIDAR_RETRY_DELAY_S = 0.75
 LIDAR_STOP_COMMAND = b"\xA5\x25"
 DEFAULT_CAMERA_BUFFER_COUNT = 6
+DEFAULT_WEB_PORT = 8000
 CAMERA_START_TIMEOUT_S = 5.0
 SIDE_TRACK_MIN_POINTS = 3
 SIDE_TRACK_SAMPLE_COUNT = 7
@@ -61,11 +64,222 @@ SIDE_MISSING_CYCLES = 4
 FOLLOW_HEADING_DIVISOR_DEG = 20.0
 FOLLOW_HEADING_MAX_FRACTION = 0.60
 MPU_YAW_SIGN_CALIBRATION_DEG = 1.0
+TRACK_CLUSTER_MAX_ANGLE_GAP_DEG = 7.0
+TRACK_CLUSTER_MAX_POINT_GAP_M = 0.45
+TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.90
+TRACK_ASSOCIATION_MAX_ANGLE_DEG = 55.0
+TRACK_MEMORY_CYCLES = 18
+TRACK_FILTER_ALPHA = 0.72
+TRACK_SIDE_MIN_ANGLE_DEG = 25.0
 
 
 def signed_lidar_angle(angle):
     """Convert 0..360 degrees to -180..180, with forward at zero."""
     return ((float(angle) + 180.0) % 360.0) - 180.0
+
+
+def polar_xy(distance_m, angle_deg):
+    """Convert lidar polar coordinates to right/forward robot coordinates."""
+    angle_rad = math.radians(angle_deg)
+    return distance_m * math.sin(angle_rad), distance_m * math.cos(angle_rad)
+
+
+def cluster_lidar_points(points):
+    """Group adjacent lidar returns into physical obstacle surfaces."""
+    samples = sorted(
+        (
+            {
+                "angle_deg": float(point["relative_angle_deg"]),
+                "distance_m": float(point["distance_mm"]) / 1000.0,
+            }
+            for point in points
+            if point.get("distance_mm", 0.0) > 0.0
+        ),
+        key=lambda sample: sample["angle_deg"],
+    )
+    groups = []
+    for sample in samples:
+        sample["x_m"], sample["y_m"] = polar_xy(
+            sample["distance_m"], sample["angle_deg"]
+        )
+        if not groups:
+            groups.append([sample])
+            continue
+        previous = groups[-1][-1]
+        angle_gap = sample["angle_deg"] - previous["angle_deg"]
+        point_gap = math.hypot(
+            sample["x_m"] - previous["x_m"],
+            sample["y_m"] - previous["y_m"],
+        )
+        if (
+            angle_gap <= TRACK_CLUSTER_MAX_ANGLE_GAP_DEG
+            and point_gap <= TRACK_CLUSTER_MAX_POINT_GAP_M
+        ):
+            groups[-1].append(sample)
+        else:
+            groups.append([sample])
+
+    clusters = []
+    for group in groups:
+        # The closest few points represent the surface the body must clear;
+        # farther returns in the same angular run should not pull the track
+        # through or behind the obstacle.
+        surface = sorted(group, key=lambda sample: sample["distance_m"])[
+            :SIDE_TRACK_SAMPLE_COUNT
+        ]
+        angle_deg = median(sample["angle_deg"] for sample in surface)
+        distance_m = median(sample["distance_m"] for sample in surface)
+        x_m, y_m = polar_xy(distance_m, angle_deg)
+        lateral_m = median(abs(sample["x_m"]) for sample in surface)
+        clusters.append(
+            {
+                "angle_deg": angle_deg,
+                "distance_m": distance_m,
+                "x_m": x_m,
+                "y_m": y_m,
+                "lateral_m": lateral_m,
+                "point_count": len(group),
+            }
+        )
+    return clusters
+
+
+class LockedObstacleTracker:
+    """Keep the lidar surface that triggered a bypass locked across turns."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.locked = False
+        self.angle_deg = None
+        self.distance_m = None
+        self.lateral_m = None
+        self.missing_cycles = 0
+        self.observation_cycles = 0
+        self.last_commanded_heading_deg = 0.0
+        self.point_count = 0
+        self.association_error_m = None
+
+    def lock(self, lidar_status, commanded_heading_deg=0.0):
+        """Seal the nearest forward obstacle as the bypass target."""
+        angle_deg = lidar_status.get("nearest_angle_deg")
+        distance_m = lidar_status.get("nearest_m")
+        if angle_deg is None or distance_m is None:
+            return False
+        target_x, target_y = polar_xy(distance_m, angle_deg)
+        clusters = cluster_lidar_points(lidar_status.get("points", []))
+        cluster = min(
+            clusters,
+            key=lambda item: math.hypot(
+                item["x_m"] - target_x, item["y_m"] - target_y
+            ),
+            default=None,
+        )
+        if cluster is None:
+            cluster = {
+                "angle_deg": angle_deg,
+                "distance_m": distance_m,
+                "lateral_m": abs(target_x),
+                "point_count": 1,
+            }
+        self.locked = True
+        self.angle_deg = cluster["angle_deg"]
+        self.distance_m = cluster["distance_m"]
+        self.lateral_m = cluster["lateral_m"]
+        self.missing_cycles = 0
+        self.observation_cycles = 1
+        self.last_commanded_heading_deg = commanded_heading_deg
+        self.point_count = cluster["point_count"]
+        self.association_error_m = 0.0
+        return True
+
+    def update(self, lidar_status, commanded_heading_deg):
+        """Predict the locked bearing, then associate it with the next scan."""
+        if not self.locked:
+            return False
+        heading_delta = signed_lidar_angle(
+            commanded_heading_deg - self.last_commanded_heading_deg
+        )
+        predicted_angle = signed_lidar_angle(self.angle_deg - heading_delta)
+        predicted_x, predicted_y = polar_xy(self.distance_m, predicted_angle)
+        self.angle_deg = predicted_angle
+        self.last_commanded_heading_deg = commanded_heading_deg
+
+        max_distance = (
+            TRACK_ASSOCIATION_MAX_DISTANCE_M + 0.08 * self.missing_cycles
+        )
+        max_angle = min(
+            100.0,
+            TRACK_ASSOCIATION_MAX_ANGLE_DEG + 4.0 * self.missing_cycles,
+        )
+        candidates = []
+        for cluster in cluster_lidar_points(lidar_status.get("points", [])):
+            angle_error = abs(
+                signed_lidar_angle(cluster["angle_deg"] - predicted_angle)
+            )
+            position_error = math.hypot(
+                cluster["x_m"] - predicted_x,
+                cluster["y_m"] - predicted_y,
+            )
+            if angle_error <= max_angle and position_error <= max_distance:
+                score = position_error + angle_error * 0.006
+                candidates.append((score, position_error, cluster))
+
+        if not candidates:
+            self.missing_cycles += 1
+            self.association_error_m = None
+            if self.missing_cycles > TRACK_MEMORY_CYCLES:
+                self.locked = False
+            return False
+
+        _, position_error, cluster = min(candidates, key=lambda item: item[0])
+        angle_error = signed_lidar_angle(cluster["angle_deg"] - predicted_angle)
+        self.angle_deg = signed_lidar_angle(
+            predicted_angle + TRACK_FILTER_ALPHA * angle_error
+        )
+        self.distance_m = (
+            TRACK_FILTER_ALPHA * cluster["distance_m"]
+            + (1.0 - TRACK_FILTER_ALPHA) * self.distance_m
+        )
+        # Lateral clearance changes quickly while the obstacle moves from the
+        # front to the side. Keep this measurement current; the wall-following
+        # controller already applies its own distance filter and deadband.
+        self.lateral_m = cluster["lateral_m"]
+        self.missing_cycles = 0
+        self.observation_cycles += 1
+        self.point_count = cluster["point_count"]
+        self.association_error_m = position_error
+        return True
+
+    def side_distance(self, bypass_side):
+        if not self.locked or abs(self.angle_deg) < TRACK_SIDE_MIN_ANGLE_DEG:
+            return None
+        expected_sign = 1.0 if bypass_side == "left" else -1.0
+        if self.angle_deg * expected_sign <= 0.0:
+            return None
+        return self.lateral_m
+
+    def status(self):
+        return {
+            "locked": self.locked,
+            "angle_deg": (
+                round(self.angle_deg, 1) if self.angle_deg is not None else None
+            ),
+            "distance_m": (
+                round(self.distance_m, 3) if self.distance_m is not None else None
+            ),
+            "lateral_m": (
+                round(self.lateral_m, 3) if self.lateral_m is not None else None
+            ),
+            "missing_cycles": self.missing_cycles,
+            "observation_cycles": self.observation_cycles,
+            "point_count": self.point_count,
+            "association_error_m": (
+                round(self.association_error_m, 3)
+                if self.association_error_m is not None else None
+            ),
+        }
 
 
 def ensure_lidar_driver():
@@ -223,6 +437,15 @@ class LidarObstacleMonitor:
         def relative_angle(point):
             return signed_lidar_angle(point["angle"] - self.forward_offset_deg)
 
+        relative_points = [
+            {
+                "relative_angle_deg": round(relative_angle(point), 2),
+                "distance_mm": round(point["distance_mm"], 1),
+                "quality": point["quality"],
+            }
+            for point in points
+        ]
+
         forward = [
             point
             for point in points
@@ -336,8 +559,99 @@ class LidarObstacleMonitor:
             "right_angle_deg": right_track["angle_deg"],
             "right_forward_m": right_track["forward_m"],
             "forward_half_angle_deg": self.forward_angle_deg,
+            "points": relative_points,
             "error": str(self.error) if self.error is not None else None,
         }
+
+
+DASHBOARD_HTML = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hexapod Obstacle Tracking</title><style>
+body{margin:0;background:#091015;color:#e5edf3;font:14px system-ui,sans-serif}header{padding:12px 16px;border-bottom:1px solid #293640;display:flex;gap:16px;align-items:center}h1{font-size:18px;margin:0}.status{color:#8bd5a1}main{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px}section{min-width:0}h2{font-size:14px;margin:0 0 8px;color:#a9bac7}img,canvas{display:block;width:100%;aspect-ratio:4/3;object-fit:contain;background:#03070a;border:1px solid #293640}pre{white-space:pre-wrap;color:#b8c7d1;margin:10px 0 0}@media(max-width:800px){main{grid-template-columns:1fr}}
+</style></head><body><header><h1>Hexapod Obstacle Tracking</h1><div id="status" class="status">Starting</div></header><main><section><h2>AI Camera</h2><img id="camera" alt="Annotated camera view"></section><section><h2>RPLIDAR C1</h2><canvas id="lidar" width="800" height="600"></canvas><pre id="details"></pre></section></main><script>
+const camera=document.querySelector('#camera'),canvas=document.querySelector('#lidar'),ctx=canvas.getContext('2d'),statusEl=document.querySelector('#status'),details=document.querySelector('#details');
+function draw(data){const lidar=data.lidar||{},pts=lidar.points||[],bypass=lidar.bypass||{},track=bypass.tracked_obstacle||{},w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=Math.min(w,h)*.44,max=2500;ctx.clearRect(0,0,w,h);ctx.strokeStyle='#29404f';ctx.fillStyle='#8aa0ae';ctx.font='13px system-ui';ctx.textAlign='center';for(let i=1;i<=5;i++){ctx.beginPath();ctx.arc(cx,cy,r*i/5,0,Math.PI*2);ctx.stroke();ctx.fillText((max*i/5000).toFixed(1)+'m',cx+4,cy-r*i/5+15)}ctx.beginPath();ctx.moveTo(cx-r,cy);ctx.lineTo(cx+r,cy);ctx.moveTo(cx,cy-r);ctx.lineTo(cx,cy+r);ctx.stroke();ctx.fillStyle='#44c7e8';for(const p of pts){const a=p.relative_angle_deg*Math.PI/180,d=Math.min(p.distance_mm/max,1)*r,x=cx+Math.sin(a)*d,y=cy-Math.cos(a)*d;ctx.beginPath();ctx.arc(x,y,2.5,0,Math.PI*2);ctx.fill()}if(track.locked&&track.angle_deg!=null&&track.distance_m!=null){const a=track.angle_deg*Math.PI/180,d=Math.min(track.distance_m*1000/max,1)*r,x=cx+Math.sin(a)*d,y=cy-Math.cos(a)*d;ctx.strokeStyle='#ff9f43';ctx.fillStyle='#ff9f43';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();ctx.beginPath();ctx.arc(x,y,10,0,Math.PI*2);ctx.fill();ctx.lineWidth=1}statusEl.textContent=(data.motion||'unknown')+' | camera '+(data.camera_live?'live':'waiting')+' | lidar '+(lidar.live?'live':'stale')+' | target '+(track.locked?'LOCKED':'none');details.textContent=`motion: ${data.motion||'unknown'}\nsteering: ${Number(data.steering||0).toFixed(2)}\nphase: ${bypass.phase||'cruise'}\ntarget bearing: ${track.angle_deg==null?'--':track.angle_deg+' deg'}\ntarget range: ${track.distance_m==null?'--':track.distance_m+' m'}\nside clearance: ${track.lateral_m==null?'--':track.lateral_m+' m'}\ntarget scan points: ${track.point_count||0}\nmissed scans: ${track.missing_cycles||0}`;}
+async function update(){try{const response=await fetch('/state',{cache:'no-store'});draw(await response.json());camera.src='/camera.jpg?t='+Date.now()}catch(error){statusEl.textContent='Dashboard disconnected'}}setInterval(update,200);update();
+</script></body></html>"""
+
+
+def local_ip():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+        try:
+            connection.connect(("10.255.255.255", 1))
+            return connection.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+
+class AvoidanceDashboard:
+    """Serve the annotated camera frame and locked-target lidar view."""
+
+    def __init__(self, port):
+        self.port = port
+        self.lock = threading.Lock()
+        self.state = {"motion": "starting", "camera_live": False, "lidar": {}}
+        self.camera_frame = None
+        self.server = None
+        self.thread = None
+
+    def start(self):
+        dashboard = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                path = self.path.split("?", 1)[0]
+                if path in ("/", "/index.html"):
+                    body = DASHBOARD_HTML.encode("utf-8")
+                    content_type = "text/html; charset=utf-8"
+                elif path == "/state":
+                    with dashboard.lock:
+                        body = json.dumps(
+                            dashboard.state, separators=(",", ":")
+                        ).encode()
+                    content_type = "application/json"
+                elif path == "/camera.jpg":
+                    with dashboard.lock:
+                        body = dashboard.camera_frame
+                    if body is None:
+                        self.send_error(503, "Camera frame is not ready")
+                        return
+                    content_type = "image/jpeg"
+                else:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        self.server = ThreadingHTTPServer(("0.0.0.0", self.port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        return f"http://{local_ip()}:{self.port}"
+
+    def update_state(self, state):
+        with self.lock:
+            self.state = state
+
+    def update_camera(self, frame):
+        with self.lock:
+            self.camera_frame = frame
+
+    def stop(self):
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+        if self.thread is not None:
+            self.thread.join(timeout=2.0)
+        self.server = None
+        self.thread = None
 
 
 class ObstacleBypassController:
@@ -358,6 +672,7 @@ class ObstacleBypassController:
         self.heading_tolerance_deg = heading_tolerance_deg
         self.emergency_distance_m = emergency_distance_m
         self.fallback_direction = fallback_direction
+        self.tracker = LockedObstacleTracker()
         self.reset()
 
     def reset(self, camera_rearm_required=False):
@@ -377,6 +692,7 @@ class ObstacleBypassController:
         self.last_distance_error_m = None
         self.last_steering = 0.0
         self.camera_rearm_required = camera_rearm_required
+        self.tracker.reset()
 
     def _start_bypass(
         self,
@@ -402,6 +718,11 @@ class ObstacleBypassController:
         self.last_side_angle_deg = None
         self.last_distance_error_m = None
         self.camera_rearm_required = True
+        if not preserve_heading or not self.tracker.locked:
+            self.tracker.lock(
+                lidar_status,
+                commanded_heading_deg=self.commanded_heading_error_deg,
+            )
 
     def _update_heading(self, current_yaw_deg):
         if self.phase == "cruise":
@@ -436,12 +757,16 @@ class ObstacleBypassController:
         return -self.max_steering if self.bypass_side == "left" else self.max_steering
 
     def _obstacle_side_distance(self, lidar_status):
+        if self.tracker.locked:
+            return self.tracker.side_distance(self.bypass_side)
         # Passing on the left leaves the obstacle on the robot's right, and
         # passing on the right leaves it on the robot's left.
         key = "right_distance_m" if self.bypass_side == "left" else "left_distance_m"
         return lidar_status.get(key)
 
     def _obstacle_side_angle(self, lidar_status):
+        if self.tracker.locked:
+            return self.tracker.angle_deg
         key = "right_angle_deg" if self.bypass_side == "left" else "left_angle_deg"
         return lidar_status.get(key)
 
@@ -541,6 +866,18 @@ class ObstacleBypassController:
                 return {"mode": "forward", "steering": 0.0}
             self._start_bypass(lidar_status, current_yaw_deg=current_yaw_deg)
 
+        if self.phase != "cruise":
+            if not self.tracker.locked and lidar_ahead:
+                self.tracker.lock(
+                    lidar_status,
+                    commanded_heading_deg=self.commanded_heading_error_deg,
+                )
+            else:
+                self.tracker.update(
+                    lidar_status,
+                    self.commanded_heading_error_deg,
+                )
+
         # The camera starts a bypass, but lidar owns it afterward. Otherwise a
         # large bounding box still visible at the image edge repeatedly forces
         # a full turn-away command and makes the robot orbit the obstacle.
@@ -589,7 +926,10 @@ class ObstacleBypassController:
 
             self.side_missing_cycles = 0
             self.last_side_angle_deg = side_angle
-            if self._side_has_passed(side_angle):
+            track_observed = (
+                not self.tracker.locked or self.tracker.missing_cycles == 0
+            )
+            if track_observed and self._side_has_passed(side_angle):
                 self.side_passed_cycles += 1
                 if self.side_passed_cycles >= SIDE_PASSED_CYCLES:
                     return self._return_heading()
@@ -655,6 +995,7 @@ class ObstacleBypassController:
             ),
             "mpu_yaw_sign": self.mpu_yaw_sign,
             "steering_command": round(self.last_steering, 3),
+            "tracked_obstacle": self.tracker.status(),
         }
 
 
@@ -751,6 +1092,17 @@ def get_args():
         type=int,
         default=DEFAULT_CAMERA_BUFFER_COUNT,
         help="Picamera2 request buffers (default: 6).",
+    )
+    parser.add_argument(
+        "--web-port",
+        type=int,
+        default=DEFAULT_WEB_PORT,
+        help="Camera/lidar dashboard port (default: 8000).",
+    )
+    parser.add_argument(
+        "--no-web",
+        action="store_true",
+        help="Disable the live camera/lidar dashboard.",
     )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
@@ -883,6 +1235,8 @@ def get_args():
         parser.error("sensor-width-px must be positive")
     if args.camera_buffers < 3:
         parser.error("camera-buffers must be at least 3")
+    if not 1 <= args.web_port <= 65535:
+        parser.error("web-port must be between 1 and 65535")
     return args
 
 
@@ -959,9 +1313,12 @@ def main():
         buffer_count=args.camera_buffers,
     )
     detections = []
+    detections_lock = threading.Lock()
     blocking = False
     motion = "disengaged"
     camera_frame_ready = threading.Event()
+    dashboard = None if args.no_web else AvoidanceDashboard(args.web_port)
+    last_dashboard_frame = 0.0
 
     @lru_cache
     def model_labels():
@@ -979,7 +1336,8 @@ def main():
         nonlocal detections
         outputs = imx500.get_outputs(metadata, add_batch=True)
         if outputs is None:
-            return detections
+            with detections_lock:
+                return list(detections)
         input_w, input_h = imx500.get_input_size()
         if intrinsics.postprocess == "nanodet":
             boxes, scores, classes = nanodet(
@@ -1004,16 +1362,19 @@ def main():
             parsed.append(Detection(label_for(category), int(category), float(score),
                                     (x, y, width, height),
                                     (x + width / 2, y + height / 2)))
-        detections = parsed[:args.max_detections]
-        return detections
+        with detections_lock:
+            detections = parsed[:args.max_detections]
+            return list(detections)
 
     def draw_overlay(request, stream="main"):
+        nonlocal last_dashboard_frame
+        current = parse_detections(request.get_metadata())
         with MappedArray(request, stream) as mapped:
             height, width = mapped.array.shape[:2]
             color = (0, 0, 255) if blocking else (0, 255, 0)
             cv2.putText(mapped.array, motion, (12, 28), cv2.FONT_HERSHEY_SIMPLEX,
                         0.65, color, 2)
-            for detection in detections:
+            for detection in current:
                 x, y, box_w, box_h = detection.box
                 distance_m = obstacle_distance(detection, width, args)
                 nearby = (
@@ -1031,10 +1392,23 @@ def main():
                 cv2.putText(mapped.array, label, (x + 4, max(50, y + 22)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
 
+            now = time.monotonic()
+            if dashboard is not None and now - last_dashboard_frame >= 0.15:
+                image = mapped.array
+                if len(image.shape) == 3 and image.shape[2] == 4:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+                encoded, jpeg = cv2.imencode(
+                    ".jpg",
+                    image,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), 75],
+                )
+                if encoded:
+                    dashboard.update_camera(jpeg.tobytes())
+                    last_dashboard_frame = now
+
     def camera_callback(request):
         camera_frame_ready.set()
-        if not args.headless:
-            draw_overlay(request)
+        draw_overlay(request)
 
     imx500.show_network_fw_progress_bar()
     picam2.pre_callback = camera_callback
@@ -1089,6 +1463,16 @@ def main():
 
     camera_started = False
     try:
+        if dashboard is not None:
+            try:
+                dashboard_url = dashboard.start()
+            except OSError as error:
+                raise RuntimeError(
+                    f"Unable to start camera/lidar dashboard on port "
+                    f"{args.web_port}: {error}"
+                ) from error
+            print(f"Live camera and lidar dashboard: {dashboard_url}")
+
         print(
             f"Starting RPLIDAR C1 on {args.lidar_device} "
             f"at {LIDAR_BAUDRATE} baud."
@@ -1149,8 +1533,8 @@ def main():
                     motion = "walking_forward"
                     print("W pressed: forward walking enabled.")
 
-                metadata = picam2.capture_metadata()
-                current = parse_detections(metadata)
+                with detections_lock:
+                    current = list(detections)
                 frame_size = picam2.camera_configuration()["main"]["size"]
                 _, _, camera_blocking = select_obstacle(
                     current, frame_size, args
@@ -1191,6 +1575,23 @@ def main():
                     motion = "merging_to_original_heading"
                 else:
                     motion = "walking_forward"
+                if dashboard is not None:
+                    dashboard.update_state(
+                        {
+                            "motion": motion,
+                            "steering": round(steering, 3),
+                            "camera_live": camera_frame_ready.is_set(),
+                            "detections": [
+                                {
+                                    "label": detection.label,
+                                    "confidence": round(detection.confidence, 3),
+                                    "box": [int(value) for value in detection.box],
+                                }
+                                for detection in current
+                            ],
+                            "lidar": lidar_status,
+                        }
+                    )
                 status_printer.print(
                     current,
                     frame_size,
@@ -1251,6 +1652,8 @@ def main():
                 print(f"Camera close failed: {error}", file=sys.stderr)
             if walk is not None:
                 walk.release_all()
+            if dashboard is not None:
+                dashboard.stop()
 
 
 if __name__ == "__main__":
