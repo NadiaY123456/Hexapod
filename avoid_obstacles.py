@@ -65,12 +65,16 @@ FOLLOW_HEADING_DIVISOR_DEG = 20.0
 FOLLOW_HEADING_MAX_FRACTION = 0.60
 MPU_YAW_SIGN_CALIBRATION_DEG = 1.0
 TRACK_CLUSTER_MAX_ANGLE_GAP_DEG = 7.0
-TRACK_CLUSTER_MAX_POINT_GAP_M = 0.45
-TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.90
-TRACK_ASSOCIATION_MAX_ANGLE_DEG = 55.0
-TRACK_MEMORY_CYCLES = 18
+TRACK_CLUSTER_MAX_POINT_GAP_M = 0.28
+TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.45
+TRACK_ASSOCIATION_MAX_ANGLE_DEG = 32.0
+TRACK_ASSOCIATION_MAX_MISSING_DISTANCE_M = 0.70
+TRACK_ASSOCIATION_MAX_MISSING_ANGLE_DEG = 65.0
+TRACK_MEMORY_CYCLES = 24
 TRACK_FILTER_ALPHA = 0.72
-TRACK_SIDE_MIN_ANGLE_DEG = 25.0
+TRACK_SIDE_MIN_ANGLE_DEG = 15.0
+WRAP_COUNTERSTEER_CYCLES = 3
+WRAP_COUNTERSTEER_FRACTION = 0.55
 
 
 def signed_lidar_angle(angle):
@@ -131,6 +135,10 @@ def cluster_lidar_points(points):
         distance_m = median(sample["distance_m"] for sample in surface)
         x_m, y_m = polar_xy(distance_m, angle_deg)
         lateral_m = median(abs(sample["x_m"]) for sample in surface)
+        surface_width_m = math.hypot(
+            group[-1]["x_m"] - group[0]["x_m"],
+            group[-1]["y_m"] - group[0]["y_m"],
+        )
         clusters.append(
             {
                 "angle_deg": angle_deg,
@@ -139,6 +147,14 @@ def cluster_lidar_points(points):
                 "y_m": y_m,
                 "lateral_m": lateral_m,
                 "point_count": len(group),
+                "surface_width_m": surface_width_m,
+                "points": [
+                    {
+                        "relative_angle_deg": round(sample["angle_deg"], 2),
+                        "distance_mm": round(sample["distance_m"] * 1000.0, 1),
+                    }
+                    for sample in group
+                ],
             }
         )
     return clusters
@@ -159,12 +175,17 @@ class LockedObstacleTracker:
         self.observation_cycles = 0
         self.last_commanded_heading_deg = 0.0
         self.point_count = 0
+        self.surface_width_m = None
+        self.tracked_points = []
         self.association_error_m = None
 
     def lock(self, lidar_status, commanded_heading_deg=0.0):
         """Seal the nearest forward obstacle as the bypass target."""
         angle_deg = lidar_status.get("nearest_angle_deg")
         distance_m = lidar_status.get("nearest_m")
+        if angle_deg is None or distance_m is None:
+            angle_deg = lidar_status.get("track_candidate_angle_deg")
+            distance_m = lidar_status.get("track_candidate_m")
         if angle_deg is None or distance_m is None:
             return False
         target_x, target_y = polar_xy(distance_m, angle_deg)
@@ -182,6 +203,8 @@ class LockedObstacleTracker:
                 "distance_m": distance_m,
                 "lateral_m": abs(target_x),
                 "point_count": 1,
+                "surface_width_m": 0.0,
+                "points": [],
             }
         self.locked = True
         self.angle_deg = cluster["angle_deg"]
@@ -191,6 +214,8 @@ class LockedObstacleTracker:
         self.observation_cycles = 1
         self.last_commanded_heading_deg = commanded_heading_deg
         self.point_count = cluster["point_count"]
+        self.surface_width_m = cluster["surface_width_m"]
+        self.tracked_points = cluster["points"]
         self.association_error_m = 0.0
         return True
 
@@ -206,12 +231,13 @@ class LockedObstacleTracker:
         self.angle_deg = predicted_angle
         self.last_commanded_heading_deg = commanded_heading_deg
 
-        max_distance = (
-            TRACK_ASSOCIATION_MAX_DISTANCE_M + 0.08 * self.missing_cycles
+        max_distance = min(
+            TRACK_ASSOCIATION_MAX_MISSING_DISTANCE_M,
+            TRACK_ASSOCIATION_MAX_DISTANCE_M + 0.03 * self.missing_cycles,
         )
         max_angle = min(
-            100.0,
-            TRACK_ASSOCIATION_MAX_ANGLE_DEG + 4.0 * self.missing_cycles,
+            TRACK_ASSOCIATION_MAX_MISSING_ANGLE_DEG,
+            TRACK_ASSOCIATION_MAX_ANGLE_DEG + 2.0 * self.missing_cycles,
         )
         candidates = []
         for cluster in cluster_lidar_points(lidar_status.get("points", [])):
@@ -223,11 +249,15 @@ class LockedObstacleTracker:
                 cluster["y_m"] - predicted_y,
             )
             if angle_error <= max_angle and position_error <= max_distance:
-                score = position_error + angle_error * 0.006
+                width_error = abs(
+                    cluster["surface_width_m"] - self.surface_width_m
+                )
+                score = position_error + angle_error * 0.010 + width_error * 0.30
                 candidates.append((score, position_error, cluster))
 
         if not candidates:
             self.missing_cycles += 1
+            self.tracked_points = []
             self.association_error_m = None
             if self.missing_cycles > TRACK_MEMORY_CYCLES:
                 self.locked = False
@@ -249,6 +279,8 @@ class LockedObstacleTracker:
         self.missing_cycles = 0
         self.observation_cycles += 1
         self.point_count = cluster["point_count"]
+        self.surface_width_m = cluster["surface_width_m"]
+        self.tracked_points = cluster["points"]
         self.association_error_m = position_error
         return True
 
@@ -275,6 +307,11 @@ class LockedObstacleTracker:
             "missing_cycles": self.missing_cycles,
             "observation_cycles": self.observation_cycles,
             "point_count": self.point_count,
+            "surface_width_m": (
+                round(self.surface_width_m, 3)
+                if self.surface_width_m is not None else None
+            ),
+            "points": self.tracked_points,
             "association_error_m": (
                 round(self.association_error_m, 3)
                 if self.association_error_m is not None else None
@@ -457,6 +494,11 @@ class LidarObstacleMonitor:
             if point["distance_mm"] <= self.stop_distance_mm
         ]
         nearest = min(blocking_points, key=lambda point: point["distance_mm"], default=None)
+        track_candidate = min(
+            forward,
+            key=lambda point: point["distance_mm"],
+            default=None,
+        )
 
         def side_clearance(side):
             if side == "left":
@@ -526,8 +568,9 @@ class LidarObstacleMonitor:
         right_track = side_track("right")
 
         turn_direction = None
-        if nearest is not None:
-            obstacle_angle = relative_angle(nearest)
+        direction_target = nearest or track_candidate
+        if direction_target is not None:
+            obstacle_angle = relative_angle(direction_target)
             if obstacle_angle > 5.0:
                 turn_direction = "left"
             elif obstacle_angle < -5.0:
@@ -551,6 +594,14 @@ class LidarObstacleMonitor:
                 round(relative_angle(nearest), 1)
                 if nearest is not None else None
             ),
+            "track_candidate_m": (
+                round(track_candidate["distance_mm"] / 1000.0, 3)
+                if track_candidate is not None else None
+            ),
+            "track_candidate_angle_deg": (
+                round(relative_angle(track_candidate), 1)
+                if track_candidate is not None else None
+            ),
             "turn_direction": turn_direction,
             "left_distance_m": left_track["distance_m"],
             "left_angle_deg": left_track["angle_deg"],
@@ -572,7 +623,8 @@ body{margin:0;background:#091015;color:#e5edf3;font:14px system-ui,sans-serif}he
 </style></head><body><header><h1>Hexapod Obstacle Tracking</h1><div id="status" class="status">Starting</div></header><main><section><h2>AI Camera</h2><img id="camera" alt="Annotated camera view"></section><section><h2>RPLIDAR C1</h2><canvas id="lidar" width="800" height="600"></canvas><pre id="details"></pre></section></main><script>
 const camera=document.querySelector('#camera'),canvas=document.querySelector('#lidar'),ctx=canvas.getContext('2d'),statusEl=document.querySelector('#status'),details=document.querySelector('#details');
 function draw(data){const lidar=data.lidar||{},pts=lidar.points||[],bypass=lidar.bypass||{},track=bypass.tracked_obstacle||{},w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=Math.min(w,h)*.44,max=2500;ctx.clearRect(0,0,w,h);ctx.strokeStyle='#29404f';ctx.fillStyle='#8aa0ae';ctx.font='13px system-ui';ctx.textAlign='center';for(let i=1;i<=5;i++){ctx.beginPath();ctx.arc(cx,cy,r*i/5,0,Math.PI*2);ctx.stroke();ctx.fillText((max*i/5000).toFixed(1)+'m',cx+4,cy-r*i/5+15)}ctx.beginPath();ctx.moveTo(cx-r,cy);ctx.lineTo(cx+r,cy);ctx.moveTo(cx,cy-r);ctx.lineTo(cx,cy+r);ctx.stroke();ctx.fillStyle='#44c7e8';for(const p of pts){const a=p.relative_angle_deg*Math.PI/180,d=Math.min(p.distance_mm/max,1)*r,x=cx+Math.sin(a)*d,y=cy-Math.cos(a)*d;ctx.beginPath();ctx.arc(x,y,2.5,0,Math.PI*2);ctx.fill()}if(track.locked&&track.angle_deg!=null&&track.distance_m!=null){const a=track.angle_deg*Math.PI/180,d=Math.min(track.distance_m*1000/max,1)*r,x=cx+Math.sin(a)*d,y=cy-Math.cos(a)*d;ctx.strokeStyle='#ff9f43';ctx.fillStyle='#ff9f43';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();ctx.beginPath();ctx.arc(x,y,10,0,Math.PI*2);ctx.fill();ctx.lineWidth=1}statusEl.textContent=(data.motion||'unknown')+' | camera '+(data.camera_live?'live':'waiting')+' | lidar '+(lidar.live?'live':'stale')+' | target '+(track.locked?'LOCKED':'none');details.textContent=`motion: ${data.motion||'unknown'}\nsteering: ${Number(data.steering||0).toFixed(2)}\nphase: ${bypass.phase||'cruise'}\ntarget bearing: ${track.angle_deg==null?'--':track.angle_deg+' deg'}\ntarget range: ${track.distance_m==null?'--':track.distance_m+' m'}\nside clearance: ${track.lateral_m==null?'--':track.lateral_m+' m'}\ntarget scan points: ${track.point_count||0}\nmissed scans: ${track.missing_cycles||0}`;}
-async function update(){try{const response=await fetch('/state',{cache:'no-store'});draw(await response.json());camera.src='/camera.jpg?t='+Date.now()}catch(error){statusEl.textContent='Dashboard disconnected'}}setInterval(update,200);update();
+function drawLockedPoints(data){const track=(((data.lidar||{}).bypass||{}).tracked_obstacle||{}),points=track.points||[],w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=Math.min(w,h)*.44,max=2500;ctx.fillStyle='#ff9f43';for(const p of points){const a=p.relative_angle_deg*Math.PI/180,d=Math.min(p.distance_mm/max,1)*r,x=cx+Math.sin(a)*d,y=cy-Math.cos(a)*d;ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.fill()}}
+async function update(){try{const response=await fetch('/state',{cache:'no-store'}),data=await response.json();draw(data);drawLockedPoints(data);camera.src='/camera.jpg?t='+Date.now()}catch(error){statusEl.textContent='Dashboard disconnected'}}setInterval(update,200);update();
 </script></body></html>"""
 
 
@@ -691,6 +743,7 @@ class ObstacleBypassController:
         self.last_side_angle_deg = None
         self.last_distance_error_m = None
         self.last_steering = 0.0
+        self.wrap_countersteer_cycles = 0
         self.camera_rearm_required = camera_rearm_required
         self.tracker.reset()
 
@@ -717,6 +770,7 @@ class ObstacleBypassController:
         self.filtered_side_distance_m = None
         self.last_side_angle_deg = None
         self.last_distance_error_m = None
+        self.wrap_countersteer_cycles = 0
         self.camera_rearm_required = True
         if not preserve_heading or not self.tracker.locked:
             self.tracker.lock(
@@ -814,6 +868,20 @@ class ObstacleBypassController:
 
     def _follow_steering(self, side_distance_m):
         distance_steering = self._distance_steering(side_distance_m)
+        if (
+            self.wrap_countersteer_cycles > 0
+            and side_distance_m
+            >= self.target_distance_m - SIDE_DISTANCE_DEADBAND_M
+        ):
+            # Reverse the outbound turn once the requested clearance is
+            # reached. A right bypass must now steer left around the target;
+            # a left bypass mirrors that behavior.
+            countersteer = -math.copysign(
+                self.max_steering * WRAP_COUNTERSTEER_FRACTION,
+                self._away_steering(),
+            )
+            self.last_steering = countersteer
+            return countersteer
         heading_steering = self._heading_steering()
         if distance_steering * heading_steering < 0.0:
             # Clearance wins over heading. In particular, never let the merge
@@ -885,9 +953,16 @@ class ObstacleBypassController:
 
         if self.phase == "veer_out":
             side_distance = self._obstacle_side_distance(lidar_status)
-            if not obstacle_ahead and side_distance is not None and self.phase_cycles >= 2:
+            clearance_reached = (
+                side_distance is not None
+                and side_distance
+                >= self.target_distance_m - SIDE_DISTANCE_DEADBAND_M
+            )
+            if not obstacle_ahead and clearance_reached and self.phase_cycles >= 2:
                 self.phase = "follow_side"
                 self.phase_cycles = 0
+                self.wrap_countersteer_cycles = WRAP_COUNTERSTEER_CYCLES
+                self.filtered_side_distance_m = side_distance
                 self.last_side_angle_deg = self._obstacle_side_angle(lidar_status)
                 return {
                     "mode": "follow_side",
@@ -965,6 +1040,8 @@ class ObstacleBypassController:
             if self.heading_source != "mpu6050":
                 self.heading_error_deg = self.commanded_heading_error_deg
             self.phase_cycles += 1
+            if self.phase == "follow_side" and self.wrap_countersteer_cycles > 0:
+                self.wrap_countersteer_cycles -= 1
 
     def status(self):
         return {
@@ -995,6 +1072,7 @@ class ObstacleBypassController:
             ),
             "mpu_yaw_sign": self.mpu_yaw_sign,
             "steering_command": round(self.last_steering, 3),
+            "wrap_countersteer_cycles": self.wrap_countersteer_cycles,
             "tracked_obstacle": self.tracker.status(),
         }
 
@@ -1131,8 +1209,8 @@ def get_args():
     parser.add_argument(
         "--lidar-stop-distance-m",
         type=float,
-        default=1.25,
-        help="Begin bypassing a forward lidar return at this range (default: 1.25m).",
+        default=0.70,
+        help="Begin bypassing a forward lidar return at this range (default: 0.70m).",
     )
     parser.add_argument(
         "--lidar-forward-angle-deg",
@@ -1149,8 +1227,8 @@ def get_args():
     parser.add_argument(
         "--bypass-distance-m",
         type=float,
-        default=0.60,
-        help="Target side distance while passing an obstacle (default: 0.60m).",
+        default=0.32,
+        help="Target side distance while passing an obstacle (default: 0.32m/about 1ft).",
     )
     parser.add_argument(
         "--bypass-max-steering",
@@ -1173,8 +1251,8 @@ def get_args():
     parser.add_argument(
         "--lidar-emergency-distance-m",
         type=float,
-        default=0.30,
-        help="Hold position if an obstacle is critically close (default: 0.30m).",
+        default=0.20,
+        help="Hold position if an obstacle is critically close (default: 0.20m).",
     )
     parser.add_argument(
         "--clear-frames",
