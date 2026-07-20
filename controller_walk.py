@@ -44,7 +44,7 @@ kits = {
 
 LEG_CHANNELS = {
     "leg1": {"driver": "0x40", "foot": 0, "knee": 1, "hip": 2},
-    "leg2": {"driver": "0x40", "foot": 4, "knee": 5, "hip": 6},
+    "leg2": {"driver": "0x40", "foot": 13, "knee": 5, "hip": 6},
     "leg3": {"driver": "0x40", "foot": 12, "knee": 9, "hip": 10},
     "leg4": {"driver": "0x41", "foot": 0, "knee": 1, "hip": 2},
     "leg5": {"driver": "0x41", "foot": 4, "knee": 5, "hip": 6},
