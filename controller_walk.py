@@ -6,6 +6,7 @@ import struct
 import time
 from adafruit_servokit import ServoKit
 from camera_web_stream import CameraWebStream
+from lidar_viewer import LidarWebViewer
 
 try:
     import board
@@ -255,6 +256,7 @@ BODY_ROLL_FOOT_DEG = 16.0
 BODY_ROLL_KNEE_DEG = -12.0
 BODY_PITCH_FOOT_DEG = 22.0
 BODY_PITCH_KNEE_DEG = -16.0
+WALK_REAR_FOOT_INWARD_LIMIT_DEG = -3.0
 MPU6050_ADDRESS = 0x68
 LEVELING_ENABLED = True
 LEVEL_ROLL_TARGET_DEG = 0.0
@@ -264,15 +266,16 @@ LEVEL_ROLL_GAIN = 0.035
 LEVEL_PITCH_GAIN = 0.035
 LEVEL_ROLL_SIGN = -1.0
 LEVEL_PITCH_SIGN = -1.0
-LEVEL_MAX_ATTITUDE = 0.45
-LEVEL_FILTER_ALPHA = 0.70
+LEVEL_MAX_ATTITUDE = 0.30
+LEVEL_FILTER_ALPHA = 0.78
 LEVEL_SAMPLE_INTERVAL = 0.05
-# Treat MPU corrections like limited virtual right-stick commands. Moving
-# correction is deliberately weaker than standing correction so a bad reading
-# cannot dominate a tripod support phase.
-LEVEL_MOVING_ROLL_SCALE = 0.65
-LEVEL_MOVING_PITCH_SCALE = 0.65
-LEVEL_FORWARD_PITCH_SCALE = 0.65
+# Sample leveling once per tripod transfer so normal mid-step rocking does not
+# become feedback. Use 40% of the filtered correction, with a separate cap of
+# roughly one degree at the leg joints.
+TRIPOD_LEVEL_ROLL_SCALE = 0.40
+TRIPOD_LEVEL_PITCH_SCALE = 0.40
+TRIPOD_LEVEL_FORWARD_PITCH_SCALE = 0.40
+TRIPOD_LEVEL_MAX_ATTITUDE = 0.06
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
 MPU_READ_RETRY_DELAY = 0.008
@@ -839,6 +842,8 @@ class LevelingController:
         self.roll_degrees = 0.0
         self.pitch_degrees = 0.0
         self.yaw_degrees = 0.0
+        self.roll_target_degrees = LEVEL_ROLL_TARGET_DEG
+        self.pitch_target_degrees = LEVEL_PITCH_TARGET_DEG
         self.gyro_bias = (0.0, 0.0, 0.0)
         self.read_errors = 0
         self.last_sample_time = 0.0
@@ -865,11 +870,20 @@ class LevelingController:
             )
             self.filter.set_from_accel(accel_x, accel_y, accel_z)
             self.gyro_bias = self.calibrate_gyro()
+            (
+                self.roll_degrees,
+                self.pitch_degrees,
+                self.yaw_degrees,
+            ) = self.filter.euler_degrees()
+            self.roll_target_degrees = self.roll_degrees
+            self.pitch_target_degrees = self.pitch_degrees
             self.last_sample_time = time.monotonic()
             self.enabled = True
             print(
                 "MPU6050 Madgwick orientation enabled at "
-                f"address 0x{MPU6050_ADDRESS:02x}."
+                f"address 0x{MPU6050_ADDRESS:02x}; neutral reference "
+                f"roll={self.roll_target_degrees:.1f} deg, "
+                f"pitch={self.pitch_target_degrees:.1f} deg."
             )
         except Exception as error:
             print(f"MPU6050 leveling disabled: {error}")
@@ -978,13 +992,13 @@ class LevelingController:
 
         target_roll = tilt_to_virtual_stick(
             self.roll_degrees,
-            LEVEL_ROLL_TARGET_DEG,
+            self.roll_target_degrees,
             LEVEL_ROLL_GAIN,
             LEVEL_ROLL_SIGN,
         )
         target_pitch = tilt_to_virtual_stick(
             self.pitch_degrees,
-            LEVEL_PITCH_TARGET_DEG,
+            self.pitch_target_degrees,
             LEVEL_PITCH_GAIN,
             LEVEL_PITCH_SIGN,
         )
@@ -997,6 +1011,11 @@ class LevelingController:
         ) * target_pitch
 
         return {"roll": self.roll, "pitch": self.pitch}
+
+    def clear_correction(self):
+        """Return servo leveling output to neutral without disabling the MPU."""
+        self.roll = 0.0
+        self.pitch = 0.0
 
     def maybe_print_read_warning(self, error):
         now = time.monotonic()
@@ -1020,6 +1039,46 @@ class LevelingController:
             f"correction roll {self.roll:.2f}, "
             f"pitch {self.pitch:.2f}"
         )
+
+
+def tripod_level_attitude(direction, leveler=None, force=False):
+    """Return a small, bounded MPU correction for one tripod half-cycle."""
+    if leveler is None or not leveler.enabled:
+        return {"roll": 0.0, "pitch": 0.0}
+
+    level_attitude = leveler.attitude(force=force)
+    pitch_scale = (
+        TRIPOD_LEVEL_FORWARD_PITCH_SCALE
+        if direction in (1, 4)
+        else TRIPOD_LEVEL_PITCH_SCALE
+    )
+    return {
+        "roll": max(
+            -TRIPOD_LEVEL_MAX_ATTITUDE,
+            min(
+                TRIPOD_LEVEL_MAX_ATTITUDE,
+                level_attitude["roll"] * TRIPOD_LEVEL_ROLL_SCALE,
+            ),
+        ),
+        "pitch": max(
+            -TRIPOD_LEVEL_MAX_ATTITUDE,
+            min(
+                TRIPOD_LEVEL_MAX_ATTITUDE,
+                level_attitude["pitch"] * pitch_scale,
+            ),
+        ),
+    }
+
+
+def combine_attitudes(manual_attitude, correction):
+    return {
+        "roll": clamp_unit(
+            manual_attitude.get("roll", 0.0) + correction.get("roll", 0.0)
+        ),
+        "pitch": clamp_unit(
+            manual_attitude.get("pitch", 0.0) + correction.get("pitch", 0.0)
+        ),
+    }
 
 
 class WalkOdometer:
@@ -1094,36 +1153,6 @@ class WalkOdometer:
             f"direction {direction_degrees:.1f} deg, "
             f"yaw {yaw:.1f} deg"
         )
-
-
-def combined_attitude(
-    manual_attitude,
-    leveler=None,
-    roll_scale=1.0,
-    pitch_scale=1.0,
-    level_attitude=None,
-):
-    if level_attitude is None:
-        level_attitude = (
-            leveler.attitude()
-            if leveler is not None
-            else {"roll": 0.0, "pitch": 0.0}
-        )
-    return {
-        "roll": clamp_unit(
-            manual_attitude.get("roll", 0.0) + level_attitude["roll"] * roll_scale
-        ),
-        "pitch": clamp_unit(
-            manual_attitude.get("pitch", 0.0)
-            + level_attitude["pitch"] * pitch_scale
-        ),
-    }
-
-
-def moving_level_scales(direction):
-    if direction in (1, 4):
-        return LEVEL_MOVING_ROLL_SCALE, LEVEL_FORWARD_PITCH_SCALE
-    return LEVEL_MOVING_ROLL_SCALE, LEVEL_MOVING_PITCH_SCALE
 
 
 def button_turn_direction(button_values):
@@ -1274,6 +1303,16 @@ def body_attitude_offsets(leg_name, attitude):
     return foot, knee
 
 
+def walking_attitude_offsets(leg_name, attitude):
+    """Limit rear-foot tuck while preserving the foot/knee correction ratio."""
+    foot, knee = body_attitude_offsets(leg_name, attitude)
+    if leg_name in ("leg1", "leg6") and foot < WALK_REAR_FOOT_INWARD_LIMIT_DEG:
+        scale = WALK_REAR_FOOT_INWARD_LIMIT_DEG / foot
+        foot *= scale
+        knee *= scale
+    return foot, knee
+
+
 def set_walk_frame(
     home_pose,
     swing_tripod,
@@ -1305,7 +1344,7 @@ def set_walk_frame(
         hip_scale = hip_motion_scale(leg_name, direction, steering)
         foot_lift = lift * WALK_LIFT_SCALE[leg_name]
         knee_lift = lift * WALK_KNEE_LIFT_SCALE[leg_name]
-        attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
+        attitude_foot, attitude_knee = walking_attitude_offsets(leg_name, attitude)
         swing_foot = home_pose[0] + attitude_foot + WALK_LIFT_FOOT_DELTA * foot_lift
         swing_knee = (
             home_pose[1]
@@ -1320,7 +1359,7 @@ def set_walk_frame(
 
     for leg_name in stance_tripod:
         hip_scale = hip_motion_scale(leg_name, direction, steering)
-        attitude_foot, attitude_knee = body_attitude_offsets(leg_name, attitude)
+        attitude_foot, attitude_knee = walking_attitude_offsets(leg_name, attitude)
         set_leg_offsets(
             leg_name,
             home_pose[0] + attitude_foot,
@@ -1405,6 +1444,15 @@ def hold_standing_pose(home_pose, attitude=None):
     set_all_hip_offsets(0.0, delay=0.0)
 
 
+def hold_neutral_standing_pose(home_pose, manual_attitude=None, leveler=None):
+    """Hold calibrated neutral without retaining a moving MPU correction."""
+    if manual_attitude is None:
+        manual_attitude = {"roll": 0.0, "pitch": 0.0}
+    if leveler is not None:
+        leveler.clear_correction()
+    hold_standing_pose(home_pose, manual_attitude)
+
+
 def command_sit_pose(home_pose):
     print("A button: sitting.")
     set_all_hip_offsets(0.0, delay=0.0)
@@ -1450,6 +1498,8 @@ def controller_walk_half_cycle(
     if attitude is None:
         attitude = {"roll": 0.0, "pitch": 0.0}
 
+    level_attitude = tripod_level_attitude(direction, leveler, force=True)
+
     for step in range(WALK_HALF_CYCLE_STEPS + 1):
         direction, steering, stop_requested, posture_action = poll_controller_motion(
             controller,
@@ -1459,16 +1509,10 @@ def controller_walk_half_cycle(
         )
 
         if stop_requested or posture_action is not None or not direction:
-            hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
+            hold_neutral_standing_pose(home_pose, attitude, leveler)
             return direction, steering, stop_requested, posture_action, False
 
-        walk_roll_scale, walk_pitch_scale = moving_level_scales(direction)
-        active_attitude = combined_attitude(
-            attitude,
-            leveler,
-            roll_scale=walk_roll_scale,
-            pitch_scale=walk_pitch_scale,
-        )
+        active_attitude = combine_attitudes(attitude, level_attitude)
         set_walk_frame(
             home_pose,
             swing_tripod,
@@ -1591,10 +1635,7 @@ def controller_walk_control(home_pose, device_path):
                         )
                         last_reported_attitude = attitude_snapshot
                     if not direction:
-                        hold_standing_pose(
-                            home_pose,
-                            combined_attitude(attitude, leveler),
-                        )
+                        hold_neutral_standing_pose(home_pose, attitude, leveler)
 
             if stop_requested:
                 direction = 0
@@ -1630,10 +1671,7 @@ def controller_walk_control(home_pose, device_path):
 
             if movement_locked:
                 if not is_centered:
-                    hold_standing_pose(
-                        home_pose,
-                        combined_attitude(attitude, leveler),
-                    )
+                    hold_neutral_standing_pose(home_pose, attitude, leveler)
                     is_centered = True
 
                 if movement_controls_centered(
@@ -1684,7 +1722,7 @@ def controller_walk_control(home_pose, device_path):
                     last_reported_steering = 0.0
 
             if not direction:
-                hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
+                hold_neutral_standing_pose(home_pose, attitude, leveler)
                 is_centered = True
                 time.sleep(0.02)
                 continue
@@ -1741,7 +1779,7 @@ def controller_walk_control(home_pose, device_path):
                 continue
 
             if not direction:
-                hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
+                hold_neutral_standing_pose(home_pose, attitude, leveler)
                 is_centered = True
                 if last_reported_direction not in (None, 0):
                     print("Controller direction: paused")
@@ -1752,10 +1790,11 @@ def controller_walk_control(home_pose, device_path):
             if cycle_complete:
                 odometer.add_completed_half_cycle(direction, steering, leveler)
                 leveler.print_angles("MPU6050 ground-contact angle", force=True)
+                leveler.clear_correction()
                 next_swing = stance_tripod
 
     odometer.print_report(leveler)
-    hold_standing_pose(home_pose, combined_attitude(attitude, leveler))
+    hold_neutral_standing_pose(home_pose, attitude, leveler)
 
 
 def parse_args():
@@ -1790,6 +1829,19 @@ def parse_args():
     parser.add_argument("--camera-fps", type=float, default=20.0)
     parser.add_argument("--camera-hflip", action="store_true")
     parser.add_argument("--camera-vflip", action="store_true")
+    parser.add_argument(
+        "--no-lidar-view",
+        action="store_true",
+        help="Do not start the RPLIDAR terminal telemetry and browser view.",
+    )
+    parser.add_argument(
+        "--lidar-device",
+        help="C1 serial device; auto-detects /dev/ttyUSB* by default.",
+    )
+    parser.add_argument("--lidar-host", default="0.0.0.0")
+    parser.add_argument("--lidar-port", type=int, default=8001)
+    parser.add_argument("--lidar-max-range-m", type=float, default=12.0)
+    parser.add_argument("--lidar-print-interval", type=float, default=1.0)
     args = parser.parse_args()
     if not 1 <= args.camera_port <= 65535:
         parser.error("camera-port must be between 1 and 65535")
@@ -1801,6 +1853,18 @@ def parse_args():
         parser.error("camera-width and camera-height must be even numbers")
     if not 1.0 <= args.camera_fps <= 60.0:
         parser.error("camera-fps must be between 1 and 60")
+    if not 1 <= args.lidar_port <= 65535:
+        parser.error("lidar-port must be between 1 and 65535")
+    if (
+        not args.no_camera_stream
+        and not args.no_lidar_view
+        and args.camera_port == args.lidar_port
+    ):
+        parser.error("camera-port and lidar-port must be different")
+    if args.lidar_max_range_m <= 0.0:
+        parser.error("lidar-max-range-m must be positive")
+    if args.lidar_print_interval < 0.0:
+        parser.error("lidar-print-interval cannot be negative")
     return args
 
 
@@ -1845,6 +1909,7 @@ def main():
     args = parse_args()
     validate_ik_constants()
     camera_stream = None
+    lidar_viewer = None
 
     try:
         if not args.no_camera_stream:
@@ -1865,6 +1930,21 @@ def main():
                 print("Continuing with controller walking without video.")
                 camera_stream = None
 
+        if not args.no_lidar_view:
+            lidar_viewer = LidarWebViewer(
+                host=args.lidar_host,
+                port=args.lidar_port,
+                device=args.lidar_device,
+                max_range_m=args.lidar_max_range_m,
+                print_interval=args.lidar_print_interval,
+            )
+            try:
+                print(f"Lidar view: {lidar_viewer.start()}")
+            except Exception as error:
+                print(f"Lidar viewer unavailable: {error}")
+                print("Continuing with controller walking without lidar telemetry.")
+                lidar_viewer = None
+
         walk_home_pose = run_stand_up_sequence()
 
         if CONTROLLER_WALK_AFTER_STAND:
@@ -1883,6 +1963,11 @@ def main():
     except KeyboardInterrupt:
         print("Stopped by user.")
     finally:
+        try:
+            if lidar_viewer is not None:
+                lidar_viewer.stop()
+        except Exception as error:
+            print(f"Lidar viewer shutdown failed: {error}")
         try:
             if camera_stream is not None:
                 camera_stream.stop()

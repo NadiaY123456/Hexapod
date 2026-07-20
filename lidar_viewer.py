@@ -39,6 +39,21 @@ def direction_label(angle: float) -> str:
     return directions[int(((angle % 360.0) + 22.5) // 45.0) % len(directions)]
 
 
+def nearest_sector_mm(
+    points: list[dict[str, float | int | str]],
+    center_angle: float,
+    half_width: float = 22.5,
+) -> float | None:
+    """Return the nearest range in one robot-relative angular sector."""
+    distances = [
+        float(point["distance_mm"])
+        for point in points
+        if abs(((float(point["angle"]) - center_angle + 180.0) % 360.0) - 180.0)
+        <= half_width
+    ]
+    return min(distances, default=None)
+
+
 def ensure_driver() -> None:
     """Confirm that the active Python environment contains the C1 driver."""
     try:
@@ -153,6 +168,9 @@ class ScanState:
             "nearest_mm": nearest["distance_mm"] if nearest else None,
             "nearest_angle": nearest["angle"] if nearest else None,
             "nearest_direction": nearest["direction"] if nearest else None,
+            "front_left_mm": nearest_sector_mm(points, 315.0),
+            "forward_mm": nearest_sector_mm(points, 0.0),
+            "front_right_mm": nearest_sector_mm(points, 45.0),
             "max_range_mm": self.max_range_mm,
             "error": error,
         }
@@ -218,9 +236,13 @@ def local_ip() -> str:
         connection.close()
 
 
-async def print_summaries(state: ScanState) -> None:
-    while True:
-        await asyncio.sleep(0.5)
+async def print_summaries(
+    state: ScanState,
+    stop_event: threading.Event | None = None,
+    interval: float = 0.5,
+) -> None:
+    while stop_event is None or not stop_event.is_set():
+        await asyncio.sleep(interval)
         data = state.snapshot()
         nearest = data["nearest_mm"]
         nearest_text = (
@@ -231,21 +253,45 @@ async def print_summaries(state: ScanState) -> None:
                 f"{data['nearest_direction']} ({float(data['nearest_angle']):.1f}°)"
             )
         )
+        def format_range(key: str) -> str:
+            distance = data[key]
+            return "--" if distance is None else f"{float(distance) / 1000:.2f}m"
+
         print(
-            f"LIDAR: {data['point_count']} directions, "
+            f"LIDAR: FL={format_range('front_left_mm')} "
+            f"F={format_range('forward_mm')} "
+            f"FR={format_range('front_right_mm')} | "
+            f"{data['point_count']} directions, "
             f"{data['samples_per_second']} samples/s, nearest={nearest_text}",
             flush=True,
         )
 
 
-async def run_lidar(device: str, state: ScanState, print_every_point: bool) -> None:
+async def run_lidar(
+    device: str,
+    state: ScanState,
+    print_every_point: bool,
+    stop_event: threading.Event | None = None,
+) -> None:
     from rplidarc1 import RPLidar
 
     lidar = RPLidar(device, BAUDRATE)
     scan_task = asyncio.create_task(lidar.simple_scan(make_return_dict=False))
+    last_item_time = time.monotonic()
     try:
-        while True:
-            item = await asyncio.wait_for(lidar.output_queue.get(), timeout=3.0)
+        while stop_event is None or not stop_event.is_set():
+            try:
+                item = await asyncio.wait_for(
+                    lidar.output_queue.get(),
+                    timeout=0.25 if stop_event is not None else 3.0,
+                )
+            except asyncio.TimeoutError:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                if time.monotonic() - last_item_time < 3.0:
+                    continue
+                raise
+            last_item_time = time.monotonic()
             # The C1 driver represents a zero/invalid range as None. Those
             # samples are normal (for example, when no laser return is seen)
             # and should not stop the scan.
@@ -281,6 +327,123 @@ async def run_lidar(device: str, state: ScanState, print_every_point: bool) -> N
             lidar.shutdown()
         except Exception:
             lidar.reset()
+
+
+class LidarWebViewer:
+    """Run the C1 scanner, terminal telemetry, and browser view in the background."""
+
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8001,
+        device: str | None = None,
+        max_range_m: float = 12.0,
+        print_interval: float = 1.0,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.requested_device = device
+        self.max_range_m = max_range_m
+        self.print_interval = print_interval
+        self.state: ScanState | None = None
+        self.server: ThreadingHTTPServer | None = None
+        self.server_thread: threading.Thread | None = None
+        self.scan_thread: threading.Thread | None = None
+        self.stop_event = threading.Event()
+
+    @property
+    def url(self) -> str:
+        display_host = local_ip() if self.host == "0.0.0.0" else self.host
+        return f"http://{display_host}:{self.port}/"
+
+    def start(self) -> str:
+        if self.scan_thread is not None:
+            return self.url
+
+        try:
+            ensure_driver()
+            device = find_device(self.requested_device)
+        except SystemExit as error:
+            raise RuntimeError(str(error)) from error
+
+        self.state = ScanState(self.max_range_m)
+        self.state.device = device
+        try:
+            self.server = ThreadingHTTPServer(
+                (self.host, self.port),
+                make_handler(self.state),
+            )
+        except OSError as error:
+            self.server = None
+            raise RuntimeError(
+                f"Could not start lidar viewer on port {self.port}: {error}"
+            ) from error
+
+        self.stop_event.clear()
+        self.server_thread = threading.Thread(
+            target=self.server.serve_forever,
+            name="lidar-web-viewer",
+            daemon=True,
+        )
+        self.scan_thread = threading.Thread(
+            target=self._run_scan,
+            name="lidar-c1-reader",
+            daemon=True,
+        )
+        self.server_thread.start()
+        self.scan_thread.start()
+        print(f"Connecting to RPLIDAR C1 on {device} at {BAUDRATE} baud")
+        return self.url
+
+    def _run_scan(self) -> None:
+        try:
+            asyncio.run(self._scan_main())
+        except Exception as error:
+            if self.state is not None:
+                self.state.error = str(error)
+            print(f"LIDAR ERROR: {error}", file=sys.stderr, flush=True)
+
+    async def _scan_main(self) -> None:
+        tasks = [
+            asyncio.create_task(
+                run_lidar(
+                    self.state.device,
+                    self.state,
+                    False,
+                    self.stop_event,
+                )
+            )
+        ]
+        if self.print_interval > 0.0:
+            tasks.append(
+                asyncio.create_task(
+                    print_summaries(
+                        self.state,
+                        self.stop_event,
+                        self.print_interval,
+                    )
+                )
+            )
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+        if self.server_thread is not None:
+            self.server_thread.join(timeout=3.0)
+        if self.scan_thread is not None:
+            self.scan_thread.join(timeout=4.0)
+
+        self.server = None
+        self.server_thread = None
+        self.scan_thread = None
 
 
 async def async_main(args: argparse.Namespace, state: ScanState) -> None:
