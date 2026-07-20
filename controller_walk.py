@@ -268,6 +268,13 @@ LEVEL_PITCH_SIGN = -1.0
 LEVEL_MAX_ATTITUDE = 0.30
 LEVEL_FILTER_ALPHA = 0.78
 LEVEL_SAMPLE_INTERVAL = 0.05
+# Sample leveling once per tripod transfer so normal mid-step rocking does not
+# become feedback. These scales are about one third of the previous moving
+# correction, with a separate cap of roughly one degree at the leg joints.
+TRIPOD_LEVEL_ROLL_SCALE = 0.20
+TRIPOD_LEVEL_PITCH_SCALE = 0.18
+TRIPOD_LEVEL_FORWARD_PITCH_SCALE = 0.22
+TRIPOD_LEVEL_MAX_ATTITUDE = 0.06
 LEVEL_MAX_READ_ERRORS = 80
 MPU_READ_RETRIES = 4
 MPU_READ_RETRY_DELAY = 0.008
@@ -1033,6 +1040,46 @@ class LevelingController:
         )
 
 
+def tripod_level_attitude(direction, leveler=None, force=False):
+    """Return a small, bounded MPU correction for one tripod half-cycle."""
+    if leveler is None or not leveler.enabled:
+        return {"roll": 0.0, "pitch": 0.0}
+
+    level_attitude = leveler.attitude(force=force)
+    pitch_scale = (
+        TRIPOD_LEVEL_FORWARD_PITCH_SCALE
+        if direction in (1, 4)
+        else TRIPOD_LEVEL_PITCH_SCALE
+    )
+    return {
+        "roll": max(
+            -TRIPOD_LEVEL_MAX_ATTITUDE,
+            min(
+                TRIPOD_LEVEL_MAX_ATTITUDE,
+                level_attitude["roll"] * TRIPOD_LEVEL_ROLL_SCALE,
+            ),
+        ),
+        "pitch": max(
+            -TRIPOD_LEVEL_MAX_ATTITUDE,
+            min(
+                TRIPOD_LEVEL_MAX_ATTITUDE,
+                level_attitude["pitch"] * pitch_scale,
+            ),
+        ),
+    }
+
+
+def combine_attitudes(manual_attitude, correction):
+    return {
+        "roll": clamp_unit(
+            manual_attitude.get("roll", 0.0) + correction.get("roll", 0.0)
+        ),
+        "pitch": clamp_unit(
+            manual_attitude.get("pitch", 0.0) + correction.get("pitch", 0.0)
+        ),
+    }
+
+
 class WalkOdometer:
     def __init__(self):
         self.forward_mm = 0.0
@@ -1450,6 +1497,8 @@ def controller_walk_half_cycle(
     if attitude is None:
         attitude = {"roll": 0.0, "pitch": 0.0}
 
+    level_attitude = tripod_level_attitude(direction, leveler, force=True)
+
     for step in range(WALK_HALF_CYCLE_STEPS + 1):
         direction, steering, stop_requested, posture_action = poll_controller_motion(
             controller,
@@ -1462,6 +1511,7 @@ def controller_walk_half_cycle(
             hold_neutral_standing_pose(home_pose, attitude, leveler)
             return direction, steering, stop_requested, posture_action, False
 
+        active_attitude = combine_attitudes(attitude, level_attitude)
         set_walk_frame(
             home_pose,
             swing_tripod,
@@ -1469,7 +1519,7 @@ def controller_walk_half_cycle(
             step / WALK_HALF_CYCLE_STEPS,
             direction=direction,
             steering=steering,
-            attitude=attitude,
+            attitude=active_attitude,
         )
         speed_scale = movement_speed_scale(controller, direction)
         time.sleep(WALK_FRAME_DELAY / speed_scale)

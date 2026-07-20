@@ -1073,10 +1073,13 @@ def main():
         leveler = walk.LevelingController()
         next_swing = walk.TRIPOD_A
 
-    def autonomous_attitude(direction=0):
+    def neutral_attitude():
         leveler.attitude()
         leveler.clear_correction()
         return {"roll": 0.0, "pitch": 0.0}
+
+    def autonomous_walk_attitude(direction):
+        return walk.tripod_level_attitude(direction, leveler, force=True)
 
     def current_heading_yaw():
         if leveler is None or not leveler.enabled:
@@ -1131,13 +1134,13 @@ def main():
                     bypass_controller.reset()
                     motion = "stopped"
                     if home_pose is not None:
-                        walk.hold_standing_pose(home_pose, autonomous_attitude())
+                        walk.hold_standing_pose(home_pose, neutral_attitude())
                     print("S pressed: walking stopped.")
                 elif b"o" in keys:
                     walking_enabled = False
                     bypass_controller.reset()
                     stand_robot()
-                    walk.hold_standing_pose(home_pose, autonomous_attitude())
+                    walk.hold_standing_pose(home_pose, neutral_attitude())
                     motion = "standing"
                     print("O pressed: standing still; walking remains disabled.")
                 elif b"w" in keys:
@@ -1200,7 +1203,7 @@ def main():
                 if not walking_enabled:
                     continue
                 if navigation_mode.startswith("stopped_"):
-                    walk.hold_standing_pose(home_pose, autonomous_attitude())
+                    walk.hold_standing_pose(home_pose, neutral_attitude())
                     time.sleep(0.05)
                     continue
 
@@ -1217,7 +1220,7 @@ def main():
                     hip_swing_scale=1.0,
                     interpolation_steps=args.walk_steps,
                     frame_delay=args.walk_frame_delay,
-                    attitude_provider=lambda: autonomous_attitude(direction),
+                    attitude=autonomous_walk_attitude(direction),
                 )
                 next_swing = stance_tripod
                 bypass_controller.completed_half_cycle(

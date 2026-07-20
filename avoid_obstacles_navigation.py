@@ -975,10 +975,13 @@ def main():
         leveler = walk.LevelingController()
         next_swing = walk.TRIPOD_A
 
-    def autonomous_attitude(direction=0):
+    def neutral_attitude():
         leveler.attitude()
         leveler.clear_correction()
         return {"roll": 0.0, "pitch": 0.0}
+
+    def autonomous_walk_attitude(direction):
+        return walk.tripod_level_attitude(direction, leveler, force=True)
 
     def navigation_snapshot():
         current, camera_live = camera_snapshot()
@@ -1099,14 +1102,14 @@ def main():
                     clear_frames = 0
                     motion = "stopped"
                     if home_pose is not None:
-                        walk.hold_standing_pose(home_pose, autonomous_attitude())
+                        walk.hold_standing_pose(home_pose, neutral_attitude())
                     print("S pressed: walking stopped.")
                 elif b"o" in keys:
                     walking_enabled = False
                     avoiding = False
                     clear_frames = 0
                     stand_robot()
-                    walk.hold_standing_pose(home_pose, autonomous_attitude())
+                    walk.hold_standing_pose(home_pose, neutral_attitude())
                     motion = "standing"
                     print("O pressed: standing still; walking remains disabled.")
                 elif b"w" in keys:
@@ -1156,7 +1159,7 @@ def main():
                     time.sleep(0.03)
                     continue
                 if requested_mode.startswith("stopped_"):
-                    walk.hold_standing_pose(home_pose, autonomous_attitude())
+                    walk.hold_standing_pose(home_pose, neutral_attitude())
                     time.sleep(0.05)
                     continue
 
@@ -1182,6 +1185,7 @@ def main():
                         return False
                     return True
 
+                walk_attitude = autonomous_walk_attitude(direction)
                 completed = interruptible_walk_half_cycle(
                     walk,
                     home_pose,
@@ -1192,14 +1196,14 @@ def main():
                     args.turn_scale if requested_mode == "turn" else 1.0,
                     args.walk_steps,
                     args.walk_frame_delay,
-                    lambda: autonomous_attitude(direction),
+                    lambda: walk_attitude,
                     frame_is_safe,
                 )
                 if completed:
                     next_swing = stance_tripod
                     leveler.clear_correction()
                 else:
-                    walk.hold_standing_pose(home_pose, autonomous_attitude())
+                    walk.hold_standing_pose(home_pose, neutral_attitude())
     except KeyboardInterrupt:
         print("\nCtrl+C: quitting and disengaging.")
         return 0
